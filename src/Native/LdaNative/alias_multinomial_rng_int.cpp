@@ -23,13 +23,13 @@ namespace wood
             delete[]internal_memory_;
         }
     }
-    
+
     int32_t AliasMultinomialRNGInt::Next(xorshift_rng& rng, std::vector<alias_k_v>& alias_kv)
     {
         // NOTE: stl uniform_real_distribution generates the highest quality random numbers
         // yet, the other two are much faster
         auto sample = rng.rand();
-        
+
         // NOTE: use std::floor is too slow
         // here we guarantee sample * n_ is nonnegative, this makes cast work
         int idx = sample / a_int_;
@@ -42,7 +42,7 @@ namespace wood
         // the following code is equivalent to 
         // return sample < V_[idx] ? idx : K_[idx];
         // but faster, see
-        // http://stackoverflow.com/questions/6754454/speed-difference-between-if-else-and-ternary-operator-in-c
+        // https://stackoverflow.com/questions/6754454/speed-difference-between-if-else-and-ternary-operator-in-c
         int m = -(sample < alias_kv[idx].v_);
         return (idx & m) | (alias_kv[idx].k_ & ~m);
     }

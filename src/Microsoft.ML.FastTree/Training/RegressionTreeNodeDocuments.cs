@@ -5,7 +5,7 @@
 using System.Collections.Generic;
 using System.Linq;
 
-namespace Microsoft.ML.Runtime.FastTree.Internal
+namespace Microsoft.ML.Trainers.FastTree
 {
     // RegressionTreeNodeDocuments represents an association between a node in a regression
     // tree and documents belonging to that node.
@@ -13,15 +13,15 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
     // defined for the tuple
     // It also hides the fact that node can be either leaf on an interior node behind the hood.
     // The caller can treat interior node (entire subtree) in a same fashion as a leaf node.
-    public class RegressionTreeNodeDocuments
+    internal class RegressionTreeNodeDocuments
     {
-        public readonly RegressionTree Tree;
-        public readonly DocumentPartitioning Partitioning;
+        internal readonly InternalRegressionTree Tree;
+        internal readonly DocumentPartitioning Partitioning;
         public readonly int NodeIndex; //Index to a node or leaf within the tree
         private int _documentCount;
         public bool IsLeaf => NodeIndex < 0;
 
-        public RegressionTreeNodeDocuments(RegressionTree tree, DocumentPartitioning partitioning, int nodeIndex)
+        internal RegressionTreeNodeDocuments(InternalRegressionTree tree, DocumentPartitioning partitioning, int nodeIndex)
         {
             Tree = tree;
             Partitioning = partitioning;
@@ -80,12 +80,12 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
 
     //RecursiveRegressionTree captures a recursive representation of a tree
     //and inherits from RegressionTreeNodeDocuments (a non-recursive node with documents)
-    //The class in most cases would be contructed with node index of 0 and would create
+    //The class in most cases would be constructed with node index of 0 and would create
     //entire structure of a full tree accessible with LTENode and GTNode
     //
     //Curently only used for smoothing and defines operations defined in recursive fashion
     //GetWeightedOutput and SmoothLeafOutputs used for smoothing the trees
-    public class RecursiveRegressionTree : RegressionTreeNodeDocuments
+    internal class RecursiveRegressionTree : RegressionTreeNodeDocuments
     {
         //Left and right children on a regression tree
         public readonly RecursiveRegressionTree LteNode;
@@ -93,7 +93,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
         private double _weightedOutput;
         private int _nodeCount;
 
-        public RecursiveRegressionTree(RegressionTree t, DocumentPartitioning p, int n)
+        internal RecursiveRegressionTree(InternalRegressionTree t, DocumentPartitioning p, int n)
             : base(t, p, n)
         {
             _weightedOutput = double.NaN;

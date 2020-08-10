@@ -30,8 +30,9 @@
 
     <!-- If we are not signing nuget packages we default to sign binaries -->
     <ItemGroup Condition="'$(SignNugetPackages)' != 'true'">
+
       <FilesToSign Include="$(OutDir)**/*.dll">
-        <Authenticode>Microsoft</Authenticode>
+        <Authenticode>Microsoft400</Authenticode>
       </FilesToSign>
     </ItemGroup>
 

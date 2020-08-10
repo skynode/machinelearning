@@ -4,12 +4,18 @@
 
 using System;
 using Microsoft.ML.Runtime;
-using Microsoft.ML.Runtime.Data;
+using Microsoft.ML.TestFramework;
 using Xunit;
-namespace Microsoft.ML.Runtime.RunTests
+using Xunit.Abstractions;
+
+namespace Microsoft.ML.RunTests
 {
-    public sealed class TestContracts
+    public sealed class TestContracts : BaseTestClass
     {
+        public TestContracts(ITestOutputHelper output) : base(output)
+        {
+        }
+
         private void Helper(IExceptionContext ectx, MessageSensitivity expected)
         {
             Contracts.AssertValueOrNull(ectx);
@@ -42,7 +48,7 @@ namespace Microsoft.ML.Runtime.RunTests
         [Fact]
         public void ExceptionSensitivity()
         {
-            var env = new TlcEnvironment();
+            var env = new MLContext(1);
             // Default sensitivity should be unknown, that is, all bits set.
             Helper(null, MessageSensitivity.Unknown);
             // If we set it to be not sensitive, then the messages should be marked insensitive,

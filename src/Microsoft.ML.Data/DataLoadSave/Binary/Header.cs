@@ -4,10 +4,10 @@
 
 using System.Runtime.InteropServices;
 
-namespace Microsoft.ML.Runtime.Data.IO
+namespace Microsoft.ML.Data.IO
 {
     [StructLayout(LayoutKind.Explicit, Size = HeaderSize)]
-    public struct Header
+    internal struct Header
     {
         /// <summary>
         /// The fixed header size. This should not be changed even in future versions of the format.
@@ -30,12 +30,13 @@ namespace Microsoft.ML.Runtime.Data.IO
         /// <summary>
         /// The current version of the format this software can write.
         /// </summary>
-        //public const ulong WriterVersion = 0x0001000100010001; // This first version of the format, not publically released.
+        //public const ulong WriterVersion = 0x0001000100010001; // This first version of the format, not publicly released.
         //public const ulong WriterVersion = 0x0001000100010002; // Codec changes.
         //public const ulong WriterVersion = 0x0001000100010003; // Slot names.
         //public const ulong WriterVersion = 0x0001000100010004; // Column metadata.
-        public const ulong WriterVersion = 0x0001000100010005; // "NA" DvText support.
-        public const ulong CanBeReadByVersion = 0x0001000100010005;
+        //public const ulong WriterVersion = 0x0001000100010005; // "NA" DvText support.
+        public const ulong WriterVersion = 0x0001000100010006; // Replace DvTypes with .NET Standard data types.
+        public const ulong CanBeReadByVersion = 0x0001000100010006;
 
         internal static string VersionToString(ulong v)
         {

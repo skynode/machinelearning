@@ -144,12 +144,13 @@ to make it a loader or a transform. If not, it probably does not make sense.
 Let us address something fairly conspicuous. The question almost everyone
 asks, when they first start using `IDataView`: what is up with these getters?
 
-One does not fetch values directly from an `IRow` implementation (including
-`IRowCursor`). Rather, one retains a delegate that can be used to fetch
-objects, through the `GetGetter` method on `IRow`. This delegate is:
+One does not fetch values directly from a `DataViewRow` implementation (including
+`DataViewRowCursor`). Rather, one retains a delegate that can be used to fetch
+objects, through the `GetGetter` method on `DataViewRow`. This delegate is:
 
 ```csharp
 public delegate void ValueGetter<TValue>(ref TValue value);
+
 ```
 
 If you are unfamiliar with delegates, [read
@@ -159,7 +160,7 @@ method, and you use this delegate multiple times to fetch the actual column
 values as you `MoveNext` through the cursor.
 
 Some history to motivate this: In the first version of `IDataView` the
-`IRowCursor` implementation did not actually have these "getters" but rather
+`DataViewRowCursor` implementation (formerly known as `IRowCursor`) did not actually have these "getters" but rather
 had a method, `GetColumnValue<TValue>(int col, ref TValue val)`. However, this
 has the following problems:
 
@@ -191,7 +192,7 @@ values for the same columns, it will apparently be a "consistent" view. It is
 probably obvious what this mean, but specifically:
 
 The cursor as returned through `GetRowCursor` (with perhaps an identically
-constructed `IRandom` instance) in any iteration should return the same number
+constructed `System.Random` instance) in any iteration should return the same number
 of rows on all calls, and with the same values at each row.
 
 Why is this important? Many machine learning algorithms require multiple
@@ -203,7 +204,7 @@ are computed were not consistent? How could a dual algorithm like SDCA
 function with any accuracy, if the examples associated with any given dual
 variable were to change? Consider even a relatively simple transform, like a
 forward looking windowed averager, or anything relating to time series. The
-implementation of those `ICursor` interfaces often open *two* cursors on the
+implementation of those `DataViewRowCursor` interfaces often open *two* cursors on the
 underlying `IDataView`, one "look ahead" cursor used to gather and calculate
 necessary statistics, and another cursor for any data: how could the column
 constructed out of that transform be meaningful of the look ahead cursor was
@@ -249,7 +250,7 @@ data in a consistent way.
 Let us formalize this somewhat. We consider two data views to be functionally
 identical if there is absolutely no way to distinguish them: they return the
 same values, have the same types, same number of rows, they shuffle
-identically given identically constructed `IRandom` when row cursors are
+identically given identically constructed `System.Random` when row cursors are
 constructed, return the same ID for rows from the ID getter, etc. Obviously
 this concept is transitive. (Of course, `Batch` in a cursor might be different
 between the two, but that is the case even with two cursors constructed on the
@@ -313,10 +314,10 @@ are initialized using the pseudo-random number generator in an `IHost` that
 changes from one to another. But, that's a bit nit-picky.
 
 Note also: when we say functionally identical we include everything about it:
-not just the data, but the schema, its metadata, the implementation of
+not just the data, but the schema, its annotations, the implementation of
 shuffling, etc. For this reason, while serializing the data *model* has
 guarantees of consistency, serializing the *data* has no such guarantee: if
-you serialize data using the text saver, practically all metadata (except slot
+you serialize data using the text saver, practically all annotations (except slot
 names) will be completely lost, which can have implications on how some
 transforms and downstream processes work. Or: if you serialize data using the
 binary saver, suddenly it may become shufflable whereas it may not have been
@@ -327,7 +328,7 @@ ultimately limited by hardware and other runtime environment factors: the
 truth is, certain machines will, with identical programs with seemingly
 identical flows of execution result, *sometimes*, in subtly different answers
 where floating point values are concerned. Even on the same machine there are
-runtime considerations, e.g., when .NET's RyuJIT was introduced in VS2015, we
+runtime considerations, for example, when .NET's RyuJIT was introduced in VS2015, we
 had lots of test failures around our model consistency tests because the JIT
 was compiling the CLI just *slightly* differently. But, this sort of thing
 aside (which we can hardly help), we expect the models to be the same.
@@ -337,18 +338,18 @@ aside (which we can hardly help), we expect the models to be the same.
 When you create a loader you have the option of specifying not only *one* data
 input, but any number of data input files, including zero. But there's also a
 more general principle at work here with zero files: when deserializing a data
-loader from a data model with an `IMultiStreamSource` with `Count == 0` (e.g.,
+loader from a data model with an `IMultiStreamSource` with `Count == 0` (for example,
 as would be constructed with `new MultiFileSource(null)`), we have a protocol
 that *every* `IDataLoader` should work in that circumstance, and merely be a
 data view with no rows, but the same schema as it had when it was serialized.
-The purpose of this is that we often have circumstances were we need to
+The purpose of this is that we often have circumstances where we need to
 understand the schema of the data (what columns were produced, what the
-feature names are, etc.) when all we have is the data model. (E.g., the
+feature names are, etc.) when all we have is the data model. (For example, the
 `savemodel` command, and other things.)
 
 # Getters Must Fail for Invalid Types
 
-For a given `IRow`, we must expect that `GetGetter<TValue>(col)` will throw if
+For a given `DataViewRow`, we must expect that `GetGetter<TValue>(col)` will throw if
 either `IsColumnActive(col)` is `false`, or `typeof(TValue) !=
 Schema.GetColumnType(col).RawType`, as indicated in the code documentation.
 But why? It might seem reasonable to add seemingly "harmless" flexibility to
@@ -383,15 +384,15 @@ inconsistency, surprises and bugs for users and developers.
 
 # Thread Safety
 
-Any `IDataView` implementation, as well as the `ISchema`, *must* be thread
+Any `IDataView` implementation, as well as the `DataViewSchema`, *must* be thread
 safe. There is a lot of code that depends on this. For example, cross
 validation works by operating over the same dataset (just, of course, filtered
 to different subsets of the data). That amounts to multiple cursors being
 opened, simultaneously, over the same data.
 
-So: `IDataView` and `ISchema` must be thread safe. However, `IRowCursor`,
+So: `IDataView` and `DataViewSchema` must be thread safe. However, `DataViewRowCursor`,
 being a stateful object, we assume is accessed from exactly one thread at a
-time. The `IRowCursor`s returned through a `GetRowCursorSet`, however, which
+time. The `DataViewRowCursor`s returned through a `GetRowCursorSet`, however, which
 each single one must be accessed by a single thread at a time, multiple
 threads can access this set of cursors simultaneously: that's why we have that
 method in the first place.
@@ -403,7 +404,7 @@ over an `IDataView`: while cursoring, you should almost certainly not throw
 exceptions.
 
 Imagine you have a `TextLoader`. You might expect that if you have a parse
-error, e.g., you have a column of floats, and one of the rows has a value
+error, for example, you have a column of floats, and one of the rows has a value
 like, `"hi!"` or something otherwise uninterpretable, you would throw. Yet,
 consider the implications of lazy evaluation. If that column were not
 selected, the cursoring would *succeed*, because it would not look at that
@@ -425,16 +426,16 @@ could throw the exception requires that a certain column be made active, then
 you should not throw. Of course, there are extreme circumstances: for example,
 one cannot help but throw on a cursoring if, say, there is some weird system
 event, and if one somehow detects in a subsequent iteration that something is
-fundamentally broken then you can throw: e.g., the binary loader will throw if
+fundamentally broken then you can throw: for example, the binary loader will throw if
 it detects the file it is reading is corrupted, even if that corruption may
 not have been obvious immediately.
 
 # `GetGetter` Returning the Same Delegate
 
-On a single instance of `IRowCursor`, since each `IRowCursor` instance has no
+On a single instance of `DataViewRowCursor`, since each `DataViewRowCursor` instance has no
 requirement to be thread safe, it is entirely legal for a call to `GetGetter`
 on a single column to just return the same getting delegate. It has come to
-pass that the majority of implementations of `IRowCursor` actually do that,
+pass that the majority of implementations of `DataViewRowCursor` actually do that,
 since it is in some ways easier to write the code that way.
 
 This practice has inadvertently enabled a fairly attractive tool for analysis
@@ -447,35 +448,18 @@ do not, but the vast majority do.
 # Class Structuring
 
 The essential attendant classes of an `IDataView` are its schema, as returned
-through the `Schema` property, as well as the `IRowCursor` implementation(s),
+through the `Schema` property, as well as the `DataViewRowCursor` implementation(s),
 as returned through the `GetRowCursor` and `GetRowCursorSet` methods. The
 implementations for those two interfaces are typically nested within the
 `IDataView` implementation itself. The cursor implementation is almost always
 at the bottom of the data view class.
 
-# `IRow` and `ICursor` vs. `IRowCursor`
-
-We have `IRowCursor` which descends from both `IRow` and `ICursor`. Why do
-these other interfaces exist?
-
-Firstly, there are implementations of `IRow` or `ICursor` that are not
-`IRowCursor`s. We have occasionally found it useful to have something
-resembling a key-value store, but that is strongly, dynamically typed in some
-fashion. Why not simply represent this using the same idioms of `IDataView`?
-So we put them in an `IRow`. Similarly: we have several things that behave
-*like* cursors, but that are in no way *row* cursors.
-
-However, more than that, there are a number of utility functions where we want
-to operate over something like an `IRowCursor`, but we want to have some
-indication that this function will not move the cursor (in which case `IRow`
-is helpful), or that will not access any values (in which case `ICursor` is
-helpful).
 
 # Schema
 
 The schema contains information about the columns. As we see in [the design
 principles](IDataViewDesignPrinciples.md), it has index, data type, and
-optional metadata.
+optional annotations.
 
 While *programmatically* accesses to an `IDataView` are by index, from a
 user's perspective the indices are by name; most training algorithms
@@ -485,8 +469,8 @@ schema's `TryGetColumnIndex`.
 
 Regarding name hiding, the principles mention that when multiple columns have
 the same name, other columns are "hidden." The convention all implementations
-of `ISchema` obey is that the column with the *largest* index. Note however
-that this is merely convention, not part of the definition of `ISchema`.
+of `DataViewSchema` obey is that the column with the *largest* index. Note however
+that this is merely convention, not part of the definition of `DataViewSchema`.
 
 Implementations of `TryGetColumnIndex` should be O(1), that is, practically,
 this mapping ought to be backed with a dictionary in most cases. (There are
@@ -498,20 +482,20 @@ things like key-types and vector-types, when returned, should not be created
 in the function itself (thereby creating a new object every time), but rather
 stored somewhere and returned.
 
-## Metadata
+## Annotations
 
-Since metadata is *optional*, one is not obligated to necessarily produce it,
+Since annotations are *optional*, one is not obligated to necessarily produce it,
 or conform to any particular schemas for any particular kinds (beyond, say,
 the obvious things like making sure that the types and values are consistent).
 However, the flip side of that freedom given to *producers*, is that
 *consumers* are obligated, when processing a data view input, to react
-gracefully when metadata of a certain kind is absent, or not in a form that
-one expects. One should *never* fail when input metadata is in a form one does
+gracefully when an annotation of a certain kind is absent, or not in a form that
+one expects. One should *never* fail when input annotations are in a form one does
 not expect.
 
 To give a practical example of this: many transforms, learners, or other
 components that process `IDataView`s will do something with the slot names,
-but when the `SlotNames` metadata kind for a given column is either absent,
+but when the `SlotNames` annotation kind for a given column is either absent,
 *or* not of the right type (vectors of strings), *or* not of the right size
 (same length vectors as the input), the behavior is not to throw or yield
 errors or do anything of the kind, but to simply say, "oh, I don't really have

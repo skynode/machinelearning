@@ -3,10 +3,9 @@
   <Import Project="..\Directory.Build.targets" />
 
   <Target Name="PreparePackageAssets"
-          AfterTargets="Build"
-          Condition="'$(IncludeInPackage)' != ''">
+          AfterTargets="Build">
 
-    <ItemGroup>
+    <ItemGroup Condition="'$(IncludeInPackage)' != ''">
       <PackageAsset Include="$(TargetPath)"
                     RelativePath="$(IncludeInPackage)\lib\$(TargetFramework)" />
       <PackageAsset Include="@(DebugSymbolsProjectOutputGroupOutput)"
@@ -15,9 +14,44 @@
                     RelativePath="$(IncludeInPackage)\lib\$(TargetFramework)" />
     </ItemGroup>
 
+    <ItemGroup Condition="'$(IncludeAnalyzerInPackage)' != ''">
+      <PackageAsset Include="$(TargetPath)"
+                    RelativePath="$(IncludeAnalyzerInPackage)\analyzers\dotnet\cs" />
+      <PackageAsset Include="@(DebugSymbolsProjectOutputGroupOutput)"
+                    RelativePath="$(IncludeAnalyzerInPackage)\analyzers\dotnet\cs" />
+    </ItemGroup>
+
     <Copy SourceFiles="@(PackageAsset)"
           DestinationFolder="$(PackageAssetsPath)%(PackageAsset.RelativePath)" />
 
+  </Target>
+
+  <!-- API Compat -->
+  <PropertyGroup Condition="'$(RunApiCompat)' == 'true'">
+    <!-- resolve contract for APICompat as part of resolve references -->
+    <ResolveReferencesDependsOn>
+      $(ResolveReferencesDependsOn);
+      ResolveMatchingContract
+    </ResolveReferencesDependsOn>
+
+    <StableApiProject>$(RepoRoot)tools-local\Microsoft.ML.StableApi\Microsoft.ML.StableApi.csproj</StableApiProject>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(RunApiCompat)' == 'true'">
+    <PackageReference Include="Microsoft.DotNet.ApiCompat"
+                      Version="$(MicrosoftDotNetApiCompatPackageVersion)"
+                      PrivateAssets="All" />
+  </ItemGroup>
+
+  <Target Name="ResolveMatchingContract">
+    <MSBuild Projects="$(StableApiProject)"
+             Targets="GetContract"
+             Properties="ContractName=$(AssemblyName);TargetFramework=$(TargetFramework)">
+      <Output TaskParameter="TargetOutputs" ItemName="ResolvedMatchingContract"/>
+    </MSBuild>
+    <PropertyGroup>
+      <ContractOutputPath>%(ResolvedMatchingContract.DependencyPaths)</ContractOutputPath>
+    </PropertyGroup>
   </Target>
 
 </Project>

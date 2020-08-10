@@ -2,115 +2,199 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
-using Float = System.Single;
-
 using System;
 using System.Linq;
 using System.Threading.Tasks;
+using Microsoft.ML;
+using Microsoft.ML.CommandLine;
+using Microsoft.ML.Data;
+using Microsoft.ML.EntryPoints;
+using Microsoft.ML.Internal.CpuMath;
+using Microsoft.ML.Internal.Internallearn;
+using Microsoft.ML.Internal.Utilities;
+using Microsoft.ML.Numeric;
 using Microsoft.ML.Runtime;
-using Microsoft.ML.Runtime.CommandLine;
-using Microsoft.ML.Runtime.Data;
-using Microsoft.ML.Runtime.Internal.Utilities;
-using Microsoft.ML.Runtime.Internal.CpuMath;
-using Microsoft.ML.Runtime.KMeans;
-using Microsoft.ML.Runtime.Numeric;
-using Microsoft.ML.Runtime.Training;
-using Microsoft.ML.Runtime.Internal.Internallearn;
-using Microsoft.ML.Runtime.EntryPoints;
+using Microsoft.ML.Trainers;
 
-[assembly: LoadableClass(KMeansPlusPlusTrainer.Summary, typeof(KMeansPlusPlusTrainer), typeof(KMeansPlusPlusTrainer.Arguments),
+[assembly: LoadableClass(KMeansTrainer.Summary, typeof(KMeansTrainer), typeof(KMeansTrainer.Options),
     new[] { typeof(SignatureClusteringTrainer), typeof(SignatureTrainer) },
-    KMeansPlusPlusTrainer.UserNameValue,
-    KMeansPlusPlusTrainer.LoadNameValue,
-    KMeansPlusPlusTrainer.ShortName, "KMeans")]
+    KMeansTrainer.UserNameValue,
+    KMeansTrainer.LoadNameValue,
+    KMeansTrainer.ShortName, "KMeans")]
 
-[assembly: LoadableClass(typeof(void), typeof(KMeansPlusPlusTrainer), null, typeof(SignatureEntryPointModule), "KMeans")]
+[assembly: LoadableClass(typeof(void), typeof(KMeansTrainer), null, typeof(SignatureEntryPointModule), "KMeans")]
 
-namespace Microsoft.ML.Runtime.KMeans
+namespace Microsoft.ML.Trainers
 {
-    /// <include file='./doc.xml' path='doc/members/member[@name="KMeans++"]/*' />
-    public class KMeansPlusPlusTrainer : TrainerBase<KMeansPredictor>
+    /// <summary>
+    /// The <see cref="IEstimator{TTransformer}"/> for training a KMeans clusterer
+    /// </summary>
+    /// <remarks>
+    /// <format type="text/markdown"><![CDATA[
+    /// To create this trainer, use [KMeans](xref:Microsoft.ML.KMeansClusteringExtensions.KMeans(Microsoft.ML.ClusteringCatalog.ClusteringTrainers,System.String,System.String,System.Int32))
+    /// or [Kmeans(Options)](xref:Microsoft.ML.KMeansClusteringExtensions.KMeans(Microsoft.ML.ClusteringCatalog.ClusteringTrainers,Microsoft.ML.Trainers.KMeansTrainer.Options)).
+    ///
+    /// [!include[io](~/../docs/samples/docs/api-reference/io-columns-clustering.md)]
+    ///
+    /// ### Trainer Characteristics
+    /// |  |  |
+    /// | -- | -- |
+    /// | Machine learning task | Clustering |
+    /// | Is normalization required? | Yes |
+    /// | Is caching required? | Yes |
+    /// | Required NuGet in addition to Microsoft.ML | None |
+    /// | Exportable to ONNX | Yes |
+    ///
+    /// ### Training Algorithm Details
+    /// [K-means](https://en.wikipedia.org/wiki/K-means_clustering) is a popular clustering algorithm.
+    /// With K-means, the data is clustered into a specified number of clusters in order to minimize the within-cluster sum of squared distances.
+    /// This implementation follows the [Yinyang K-means method](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/ding15.pdf).
+    /// For choosing the initial cluster centeroids, one of three options can be used:
+    /// - Random initialization. This might lead to potentially bad approximations of the optimal clustering.
+    /// - The K-means++ method. This is an [improved initialization algorithm](https://en.wikipedia.org/wiki/K-means%2b%2b#Improved_initialization_algorithm)
+    /// introduced [here](http://ilpubs.stanford.edu:8090/778/1/2006-13.pdf) by Ding et al., that guarantees to find
+    /// a solution that is $O(log K)$ competitive to the optimal K-means solution.
+    /// - The K-means|| method. This method was introduced [here](https://theory.stanford.edu/~sergei/papers/vldb12-kmpar.pdf) by Bahmani et al., and uses
+    /// a parallel method that drastically reduces the number of passes needed to obtain a good initialization.
+    ///
+    /// K-means|| is the default initialization method. The other methods can be specified in the [Options](xref:Microsoft.ML.Trainers.KMeansTrainer.Options)
+    /// when creating the trainer using
+    /// [KMeansTrainer(Options)](xref:Microsoft.ML.KMeansClusteringExtensions.KMeans(Microsoft.ML.ClusteringCatalog.ClusteringTrainers,Microsoft.ML.Trainers.KMeansTrainer.Options)).
+    ///
+    /// ### Scoring Function
+    /// The output Score column contains the square of the $L_2$-norm distance (i.e., [Euclidean distance](https://en.wikipedia.org/wiki/Euclidean_distance)) of the given input vector $\textbf{x}\in \mathbb{R}^n$ to each cluster's centroid.
+    /// Assume that the centriod of the $c$-th cluster is $\textbf{m}_c \in \mathbb{R}^n$.
+    /// The $c$-th value at the Score column would be $d_c = || \textbf{x} - \textbf{m}\_c ||\_2^2$.
+    /// The predicted label is the index with the smallest value in a $K$ dimensional vector $[d\_{0}, \dots, d\_{K-1}]$, where $K$ is the number of clusters.
+    ///
+    /// For more information on K-means, and K-means++ see:
+    /// [K-means](https://en.wikipedia.org/wiki/K-means_clustering)
+    /// [K-means++](https://en.wikipedia.org/wiki/K-means%2b%2b)
+    ///
+    /// Check the See Also section for links to usage examples.
+    /// ]]>
+    /// </format>
+    /// </remarks>
+    /// <seealso cref="Microsoft.ML.Trainers.KMeansTrainer" />
+    public class KMeansTrainer : TrainerEstimatorBase<ClusteringPredictionTransformer<KMeansModelParameters>, KMeansModelParameters>
     {
-        public const string LoadNameValue = "KMeansPlusPlus";
+        internal const string LoadNameValue = "KMeansPlusPlus";
         internal const string UserNameValue = "KMeans++ Clustering";
         internal const string ShortName = "KM";
         internal const string Summary = "K-means is a popular clustering algorithm. With K-means, the data is clustered into a specified "
             + "number of clusters in order to minimize the within-cluster sum of squares. K-means++ improves upon K-means by using a better "
             + "method for choosing the initial cluster centers.";
 
-        public enum InitAlgorithm
+        public enum InitializationAlgorithm
         {
             KMeansPlusPlus = 0,
             Random = 1,
-            KMeansParallel = 2
+            KMeansYinyang = 2
         }
 
-        public class Arguments : UnsupervisedLearnerInputBaseWithWeight
+        [BestFriend]
+        internal static class Defaults
         {
-            [Argument(ArgumentType.AtMostOnce, HelpText = "The number of clusters", SortOrder = 50)]
+            /// <value>The number of clusters.</value>
+            public const int NumberOfClusters = 5;
+        }
+
+        /// <summary>
+        /// Options for the <see cref="KMeansTrainer"/> as used in [KMeansTrainer(Options)](xref:Microsoft.ML.KMeansClusteringExtensions.KMeans(Microsoft.ML.ClusteringCatalog.ClusteringTrainers,Microsoft.ML.Trainers.KMeansTrainer.Options)).
+        /// </summary>
+        public sealed class Options : UnsupervisedTrainerInputBaseWithWeight
+        {
+            /// <summary>
+            /// The number of clusters.
+            /// </summary>
+            [Argument(ArgumentType.AtMostOnce, HelpText = "The number of clusters", SortOrder = 50, Name = "K")]
             [TGUI(SuggestedSweeps = "5,10,20,40")]
             [TlcModule.SweepableDiscreteParam("K", new object[] { 5, 10, 20, 40 })]
-            public int K = 5;
+            public int NumberOfClusters = Defaults.NumberOfClusters;
 
+            /// <summary>
+            /// Cluster initialization algorithm.
+            /// </summary>
             [Argument(ArgumentType.AtMostOnce, HelpText = "Cluster initialization algorithm", ShortName = "init")]
-            public InitAlgorithm InitAlgorithm = InitAlgorithm.KMeansParallel;
+            public InitializationAlgorithm InitializationAlgorithm = InitializationAlgorithm.KMeansYinyang;
 
-            [Argument(ArgumentType.AtMostOnce, HelpText = "Tolerance parameter for trainer convergence. Lower = slower, more accurate",
-                ShortName = "ot")]
+            /// <summary>
+            /// Tolerance parameter for trainer convergence. Low = slower, more accurate.
+            /// </summary>
+            [Argument(ArgumentType.AtMostOnce, HelpText = "Tolerance parameter for trainer convergence. Low = slower, more accurate",
+                Name = "OptTol", ShortName = "ot")]
             [TGUI(Label = "Optimization Tolerance", Description = "Threshold for trainer convergence")]
-            public Float OptTol = (Float)1e-7;
+            public float OptimizationTolerance = (float)1e-7;
 
-            [Argument(ArgumentType.AtMostOnce, HelpText = "Maximum number of iterations.", ShortName = "maxiter")]
+            /// <summary>
+            /// Maximum number of iterations.
+            /// </summary>
+            [Argument(ArgumentType.AtMostOnce, HelpText = "Maximum number of iterations.", ShortName = "maxiter, NumberOfIterations")]
             [TGUI(Label = "Max Number of Iterations")]
-            public int MaxIterations = 1000;
+            public int MaximumNumberOfIterations = 1000;
 
-            [Argument(ArgumentType.AtMostOnce, HelpText = "Memory budget (in MBs) to use for KMeans acceleration", ShortName = "accelMemBudgetMb")]
+            /// <summary>
+            /// Memory budget (in MBs) to use for KMeans acceleration.
+            /// </summary>
+            [Argument(ArgumentType.AtMostOnce, HelpText = "Memory budget (in MBs) to use for KMeans acceleration",
+                Name = "AccelMemBudgetMb", ShortName = "accelMemBudgetMb")]
             [TGUI(Label = "Memory Budget (in MBs) for KMeans Acceleration")]
-            public int AccelMemBudgetMb = 4 * 1024; // by default, use at most 4 GB
+            public int AccelerationMemoryBudgetMb = 4 * 1024; // by default, use at most 4 GB
 
+            /// <summary>
+            /// Degree of lock-free parallelism. Defaults to automatic. Determinism not guaranteed.
+            /// </summary>
             [Argument(ArgumentType.AtMostOnce, HelpText = "Degree of lock-free parallelism. Defaults to automatic. Determinism not guaranteed.", ShortName = "nt,t,threads", SortOrder = 50)]
             [TGUI(Label = "Number of threads")]
-            public int? NumThreads;
+            public int? NumberOfThreads;
         }
 
         private readonly int _k;
 
         private readonly int _maxIterations; // max number of iterations to train
-        private readonly Float _convergenceThreshold; // convergence thresholds
+        private readonly float _convergenceThreshold; // convergence thresholds
 
         private readonly long _accelMemBudgetMb;
-        private readonly InitAlgorithm _initAlgorithm;
+        private readonly InitializationAlgorithm _initAlgorithm;
         private readonly int _numThreads;
+        private readonly string _featureColumn;
 
         public override TrainerInfo Info { get; }
-        public override PredictionKind PredictionKind => PredictionKind.Clustering;
+        private protected override PredictionKind PredictionKind => PredictionKind.Clustering;
 
-        public KMeansPlusPlusTrainer(IHostEnvironment env, Arguments args)
-            : base(env, LoadNameValue)
+        /// <summary>
+        /// Initializes a new instance of <see cref="KMeansTrainer"/>
+        /// </summary>
+        /// <param name="env">The <see cref="IHostEnvironment"/> to use.</param>
+        /// <param name="options">The advanced options of the algorithm.</param>
+        internal KMeansTrainer(IHostEnvironment env, Options options)
+            : base(Contracts.CheckRef(env, nameof(env)).Register(LoadNameValue), TrainerUtils.MakeR4VecFeature(options.FeatureColumnName), default, TrainerUtils.MakeR4ScalarWeightColumn(options.ExampleWeightColumnName))
         {
-            Host.CheckValue(args, nameof(args));
-            Host.CheckUserArg(args.K > 0, nameof(args.K), "Must be positive");
+            Host.CheckValue(options, nameof(options));
+            Host.CheckUserArg(options.NumberOfClusters > 0, nameof(options.NumberOfClusters), "Must be positive");
 
-            _k = args.K;
+            _featureColumn = options.FeatureColumnName;
 
-            Host.CheckUserArg(args.MaxIterations > 0, nameof(args.MaxIterations), "Must be positive");
-            _maxIterations = args.MaxIterations;
+            _k = options.NumberOfClusters;
 
-            Host.CheckUserArg(args.OptTol > 0, nameof(args.OptTol), "Tolerance must be positive");
-            _convergenceThreshold = args.OptTol;
+            Host.CheckUserArg(options.MaximumNumberOfIterations > 0, nameof(options.MaximumNumberOfIterations), "Must be positive");
+            _maxIterations = options.MaximumNumberOfIterations;
 
-            Host.CheckUserArg(args.AccelMemBudgetMb > 0, nameof(args.AccelMemBudgetMb), "Must be positive");
-            _accelMemBudgetMb = args.AccelMemBudgetMb;
+            Host.CheckUserArg(options.OptimizationTolerance > 0, nameof(options.OptimizationTolerance), "Tolerance must be positive");
+            _convergenceThreshold = options.OptimizationTolerance;
 
-            _initAlgorithm = args.InitAlgorithm;
+            Host.CheckUserArg(options.AccelerationMemoryBudgetMb > 0, nameof(options.AccelerationMemoryBudgetMb), "Must be positive");
+            _accelMemBudgetMb = options.AccelerationMemoryBudgetMb;
 
-            Host.CheckUserArg(!args.NumThreads.HasValue || args.NumThreads > 0, nameof(args.NumThreads),
+            _initAlgorithm = options.InitializationAlgorithm;
+
+            Host.CheckUserArg(!options.NumberOfThreads.HasValue || options.NumberOfThreads > 0, nameof(options.NumberOfThreads),
                 "Must be either null or a positive integer.");
-            _numThreads = ComputeNumThreads(Host, args.NumThreads);
+            _numThreads = ComputeNumThreads(options.NumberOfThreads);
             Info = new TrainerInfo();
         }
 
-        public override KMeansPredictor Train(TrainContext context)
+        private protected override KMeansModelParameters TrainModelCore(TrainContext context)
         {
             Host.CheckValue(context, nameof(context));
             var data = context.TrainingSet;
@@ -120,13 +204,11 @@ namespace Microsoft.ML.Runtime.KMeans
 
             using (var ch = Host.Start("Training"))
             {
-                var pred = TrainCore(ch, data, dimensionality);
-                ch.Done();
-                return pred;
+                return TrainCore(ch, data, dimensionality);
             }
         }
 
-        private KMeansPredictor TrainCore(IChannel ch, RoleMappedData data, int dimensionality)
+        private KMeansModelParameters TrainCore(IChannel ch, RoleMappedData data, int dimensionality)
         {
             Host.AssertValue(ch);
             ch.AssertValue(data);
@@ -136,26 +218,30 @@ namespace Microsoft.ML.Runtime.KMeans
 
             // The coordinates of the final centroids at the end of the training. During training
             // it holds the centroids of the previous iteration.
-            var centroids = new VBuffer<Float>[_k];
+            var centroids = new VBuffer<float>[_k];
             for (int i = 0; i < _k; i++)
-                centroids[i] = VBufferUtils.CreateDense<Float>(dimensionality);
+                centroids[i] = VBufferUtils.CreateDense<float>(dimensionality);
 
             ch.Info("Initializing centroids");
             long missingFeatureCount;
             long totalTrainingInstances;
 
-            var cursorFactory = new FeatureFloatVectorCursor.Factory(data, CursOpt.Features | CursOpt.Id | CursOpt.Weight);
+            CursOpt cursorOpt = CursOpt.Id | CursOpt.Features;
+            if (data.Schema.Weight.HasValue)
+                cursorOpt |= CursOpt.Weight;
+
+            var cursorFactory = new FeatureFloatVectorCursor.Factory(data, cursorOpt);
             // REVIEW: It would be nice to extract these out into subcomponents in the future. We should
             // revisit and even consider breaking these all into individual KMeans-flavored trainers, they
             // all produce a valid set of output centroids with various trade-offs in runtime (with perhaps
             // random initialization creating a set that's not terribly useful.) They could also be extended to
             // pay attention to their incoming set of centroids and incrementally train.
-            if (_initAlgorithm == InitAlgorithm.KMeansPlusPlus)
+            if (_initAlgorithm == InitializationAlgorithm.KMeansPlusPlus)
             {
                 KMeansPlusPlusInit.Initialize(Host, _numThreads, ch, cursorFactory, _k, dimensionality,
                     centroids, out missingFeatureCount, out totalTrainingInstances);
             }
-            else if (_initAlgorithm == InitAlgorithm.Random)
+            else if (_initAlgorithm == InitializationAlgorithm.Random)
             {
                 KMeansRandomInit.Initialize(Host, _numThreads, ch, cursorFactory, _k,
                     centroids, out missingFeatureCount, out totalTrainingInstances);
@@ -182,21 +268,16 @@ namespace Microsoft.ML.Runtime.KMeans
                     "{0} instances with missing features detected and ignored. Consider using MissingHandler.",
                     missingFeatureCount);
             }
-            return new KMeansPredictor(Host, _k, centroids, copyIn: true);
+            return new KMeansModelParameters(Host, _k, centroids, copyIn: true);
         }
 
-        private static int ComputeNumThreads(IHost host, int? argNumThreads)
+        private static int ComputeNumThreads(int? argNumThreads)
         {
             // REVIEW: For small data sets it would be nice to clamp down on concurrency, it
             // isn't going to get us a performance improvement.
-            int maxThreads;
-            if (host.ConcurrencyFactor < 1)
-                maxThreads = Environment.ProcessorCount / 2;
-            else
-                maxThreads = host.ConcurrencyFactor;
+            int maxThreads = Environment.ProcessorCount / 2;
 
-            // If we specified a number of threads that's fine, but it must be below the
-            // host-set concurrency factor.
+            // If we specified a number of threads that's fine, but it must be below maxThreads.
             if (argNumThreads.HasValue)
                 maxThreads = Math.Min(maxThreads, argNumThreads.Value);
 
@@ -206,25 +287,44 @@ namespace Microsoft.ML.Runtime.KMeans
         [TlcModule.EntryPoint(Name = "Trainers.KMeansPlusPlusClusterer",
             Desc = Summary,
             UserName = UserNameValue,
-            ShortName = ShortName,
-            XmlInclude = new[] { @"<include file='../Microsoft.ML.KMeansClustering/doc.xml' path='doc/members/member[@name=""KMeans++""]/*' />",
-                                 @"<include file='../Microsoft.ML.KMeansClustering/doc.xml' path='doc/members/example[@name=""KMeans++""]/*' />"})]
-        public static CommonOutputs.ClusteringOutput TrainKMeans(IHostEnvironment env, Arguments input)
+            ShortName = ShortName)]
+        internal static CommonOutputs.ClusteringOutput TrainKMeans(IHostEnvironment env, Options input)
         {
             Contracts.CheckValue(env, nameof(env));
             var host = env.Register("TrainKMeans");
             host.CheckValue(input, nameof(input));
             EntryPointUtils.CheckInputArgs(host, input);
 
-            return LearnerEntryPointsUtils.Train<Arguments, CommonOutputs.ClusteringOutput>(host, input,
-                () => new KMeansPlusPlusTrainer(host, input),
-                getWeight: () => LearnerEntryPointsUtils.FindColumn(host, input.TrainingData.Schema, input.WeightColumn));
+            return TrainerEntryPointsUtils.Train<Options, CommonOutputs.ClusteringOutput>(host, input,
+                () => new KMeansTrainer(host, input),
+                getWeight: () => TrainerEntryPointsUtils.FindColumn(host, input.TrainingData.Schema, input.ExampleWeightColumnName));
         }
+
+        private protected override SchemaShape.Column[] GetOutputColumnsCore(SchemaShape inputSchema)
+        {
+            return new[]
+            {
+                new SchemaShape.Column(DefaultColumnNames.Score,
+                        SchemaShape.Column.VectorKind.Vector,
+                        NumberDataViewType.Single,
+                        false,
+                        new SchemaShape(AnnotationUtils.GetTrainerOutputAnnotation())),
+
+                new SchemaShape.Column(DefaultColumnNames.PredictedLabel,
+                        SchemaShape.Column.VectorKind.Scalar,
+                        NumberDataViewType.UInt32,
+                        true,
+                        new SchemaShape(AnnotationUtils.GetTrainerOutputAnnotation()))
+            };
+        }
+
+        private protected override ClusteringPredictionTransformer<KMeansModelParameters> MakeTransformer(KMeansModelParameters model, DataViewSchema trainSchema)
+        => new ClusteringPredictionTransformer<KMeansModelParameters>(Host, model, trainSchema, _featureColumn);
     }
 
     internal static class KMeansPlusPlusInit
     {
-        private const Float Epsilon = (Float)1e-15;
+        private const float Epsilon = (float)1e-15;
 
         /// <summary>
         /// Initialize starting centroids via KMeans++ algorithm. This algorithm will always run single-threaded,
@@ -232,7 +332,7 @@ namespace Microsoft.ML.Runtime.KMeans
         /// </summary>
         public static void Initialize(
             IHost host, int numThreads, IChannel ch, FeatureFloatVectorCursor.Factory cursorFactory,
-            int k, int dimensionality, VBuffer<Float>[] centroids,
+            int k, int dimensionality, VBuffer<float>[] centroids,
             out long missingFeatureCount, out long totalTrainingInstances, bool showWarning = true)
         {
             missingFeatureCount = 0;
@@ -240,11 +340,11 @@ namespace Microsoft.ML.Runtime.KMeans
             var stopWatch = new System.Diagnostics.Stopwatch();
             stopWatch.Start();
             const int checkIterations = 5;
-            Float[] centroidL2s = new Float[k];
+            float[] centroidL2s = new float[k];
 
             // Need two vbuffers - one for the features of the current row, and one for the features of
             // the "candidate row".
-            var candidate = default(VBuffer<Float>);
+            var candidate = default(VBuffer<float>);
             using (var pCh = host.StartProgressChannel("KMeansPlusPlusInitialize"))
             {
                 int i = 0;
@@ -268,15 +368,15 @@ namespace Microsoft.ML.Runtime.KMeans
                     // initializing i-th centroid
 
                     Double cumulativeWeight = 0; // sum of weights accumulated so far
-                    Float? cachedCandidateL2 = null;
+                    float? cachedCandidateL2 = null;
                     bool haveCandidate = false;
                     // on all iterations except 0's, we calculate L2 norm of every instance and cache the current candidate's
                     using (var cursor = cursorFactory.Create())
                     {
                         while (cursor.MoveNext())
                         {
-                            Float probabilityWeight;
-                            Float l2 = 0;
+                            float probabilityWeight;
+                            float l2 = 0;
                             if (i == 0)
                             {
                                 // This check is only performed once, at the first pass of initialization
@@ -292,11 +392,11 @@ namespace Microsoft.ML.Runtime.KMeans
                             else
                             {
                                 l2 = VectorUtils.NormSquared(cursor.Features);
-                                probabilityWeight = Float.PositiveInfinity;
+                                probabilityWeight = float.PositiveInfinity;
 
                                 for (int j = 0; j < i; j++)
                                 {
-                                    var distance = -2 * VectorUtils.DotProduct(ref cursor.Features, ref centroids[j])
+                                    var distance = -2 * VectorUtils.DotProduct(in cursor.Features, in centroids[j])
                                         + l2 + centroidL2s[j];
                                     probabilityWeight = Math.Min(probabilityWeight, distance);
                                 }
@@ -337,7 +437,7 @@ namespace Microsoft.ML.Runtime.KMeans
                             "Not enough distinct instances to populate {0} clusters (only found {1} distinct instances)", k, i);
                     }
 
-                    candidate.CopyTo(centroids[i].Values);
+                    candidate.CopyToDense(ref centroids[i]);
                     centroidL2s[i] = cachedCandidateL2 ?? VectorUtils.NormSquared(candidate);
                 }
             }
@@ -363,7 +463,7 @@ namespace Microsoft.ML.Runtime.KMeans
         // each row. Instead the RowCursor provides a stable ID across multiple
         // cursorings. We map those IDs into an index to poke into the per instance
         // structures.
-        private readonly HashArray<UInt128> _parallelIndexLookup;
+        private readonly HashArray<DataViewRowId> _parallelIndexLookup;
 
         public KMeansAcceleratedRowMap(FeatureFloatVectorCursor.Factory factory, IChannel ch,
             long baseMaxInstancesToAccelerate, long totalTrainingInstances, bool isParallel)
@@ -409,11 +509,11 @@ namespace Microsoft.ML.Runtime.KMeans
         /// preinitialize the HashArray so we can perform lock-free lookup operations during
         /// the primary KMeans pass.
         /// </summary>
-        private HashArray<UInt128> BuildParallelIndexLookup(FeatureFloatVectorCursor.Factory factory)
+        private HashArray<DataViewRowId> BuildParallelIndexLookup(FeatureFloatVectorCursor.Factory factory)
         {
             Contracts.AssertValue(factory);
 
-            HashArray<UInt128> lookup = new HashArray<UInt128>();
+            HashArray<DataViewRowId> lookup = new HashArray<DataViewRowId>();
             int n = 0;
             using (var cursor = factory.Create())
             {
@@ -455,7 +555,7 @@ namespace Microsoft.ML.Runtime.KMeans
 
             // _bestWeight holds the weight of instance x to _bestCluster[x] where weight(x) = dist(x, _bestCluster[x])^2 - norm(x)^2.
             // Note that this array is only allocated for MaxInstancesToAccelerate elements.
-            private readonly Float[] _bestWeight;
+            private readonly float[] _bestWeight;
 
             // The distance of each newly added cluster from the previous round to every old cluster
             // the first dimension of this array is the size of numSamplesPerRound
@@ -464,7 +564,7 @@ namespace Microsoft.ML.Runtime.KMeans
             // where clusterPrevCount-1 is the last index of the old clusters
             // and new clusters are stored in cluster[cPrevIdx..clusterCount-1] where
             // clusterCount-1 is the last index of the clusters.
-            private readonly Float[,] _clusterDistances;
+            private readonly float[,] _clusterDistances;
 
             public SharedState(FeatureFloatVectorCursor.Factory factory, IChannel ch, long baseMaxInstancesToAccelerate,
                 long clusterBytes, bool isParallel, int numRounds, int numSamplesPerRound, long totalTrainingInstances)
@@ -483,14 +583,14 @@ namespace Microsoft.ML.Runtime.KMeans
                 // and allocate _bestCluster and _bestWeight as much as possible.
                 if (_acceleratedRowMap.MaxInstancesToAccelerate > 0)
                 {
-                    _clusterDistances = new Float[numSamplesPerRound, numRounds * numSamplesPerRound];
+                    _clusterDistances = new float[numSamplesPerRound, numRounds * numSamplesPerRound];
                     _bestCluster = new int[_acceleratedRowMap.MaxInstancesToAccelerate];
-                    _bestWeight = new Float[_acceleratedRowMap.MaxInstancesToAccelerate];
+                    _bestWeight = new float[_acceleratedRowMap.MaxInstancesToAccelerate];
 
                     for (int i = 0; i < _acceleratedRowMap.MaxInstancesToAccelerate; i++)
                     {
                         _bestCluster[i] = -1;
-                        _bestWeight[i] = Float.MaxValue;
+                        _bestWeight[i] = float.MaxValue;
                     }
                 }
                 else
@@ -502,7 +602,7 @@ namespace Microsoft.ML.Runtime.KMeans
                 return _bestCluster[idx];
             }
 
-            public Float GetBestWeight(int idx)
+            public float GetBestWeight(int idx)
             {
                 return _bestWeight[idx];
             }
@@ -514,7 +614,7 @@ namespace Microsoft.ML.Runtime.KMeans
             /// corresponding to the weight of a distance which does not have
             /// the L2 norm of the point itself.
             /// </summary>
-            public void SetInstanceCluster(int n, Float bestWeight, int bestCluster)
+            public void SetInstanceCluster(int n, float bestWeight, int bestCluster)
             {
                 Contracts.Assert(0 <= n && n < _acceleratedRowMap.MaxInstancesToAccelerate);
                 Contracts.AssertValue(_clusterDistances);
@@ -529,8 +629,8 @@ namespace Microsoft.ML.Runtime.KMeans
             /// Computes and stores the distance of a new cluster to an old cluster
             /// <paramref name="newClusterFeatures"/> must be between 0..numSamplesPerRound-1.
             /// </summary>
-            public void SetClusterDistance(int newClusterIdxWithinSample, ref VBuffer<Float> newClusterFeatures, Float newClusterL2,
-                int oldClusterIdx, ref VBuffer<Float> oldClusterFeatures, Float oldClusterL2)
+            public void SetClusterDistance(int newClusterIdxWithinSample, in VBuffer<float> newClusterFeatures, float newClusterL2,
+                int oldClusterIdx, in VBuffer<float> oldClusterFeatures, float oldClusterL2)
             {
                 if (_clusterDistances != null)
                 {
@@ -539,7 +639,7 @@ namespace Microsoft.ML.Runtime.KMeans
                     Contracts.Assert(0 <= oldClusterIdx && oldClusterIdx < _clusterDistances.GetLength(1));
 
                     _clusterDistances[newClusterIdxWithinSample, oldClusterIdx] =
-                        MathUtils.Sqrt(newClusterL2 - 2 * VectorUtils.DotProduct(ref newClusterFeatures, ref oldClusterFeatures) + oldClusterL2);
+                        MathUtils.Sqrt(newClusterL2 - 2 * VectorUtils.DotProduct(in newClusterFeatures, in oldClusterFeatures) + oldClusterL2);
                 }
             }
 
@@ -548,19 +648,19 @@ namespace Microsoft.ML.Runtime.KMeans
             /// old cluster, cOld, and distance of a new cluster, cNew, to cOld, this function evaluates whether
             /// the distance computation of dist(x,cNew) can be avoided.
             /// </summary>
-            public bool CanWeightComputationBeAvoided(Float instanceDistanceToBestOldCluster, int bestOldCluster, int newClusterIdxWithinSample)
+            public bool CanWeightComputationBeAvoided(float instanceDistanceToBestOldCluster, int bestOldCluster, int newClusterIdxWithinSample)
             {
                 Contracts.Assert(instanceDistanceToBestOldCluster >= 0);
                 Contracts.Assert(0 <= newClusterIdxWithinSample && newClusterIdxWithinSample < _clusterDistances.GetLength(0),
                     "newClusterIdxWithinSample must be between 0..numSamplesPerRound-1");
                 Contracts.Assert((_clusterDistances == null) || (bestOldCluster == -1 ||
                     (0 <= bestOldCluster && bestOldCluster < _clusterDistances.GetLength(1))),
-                    "bestOldCluster must be -1 (not set/not enought room) or between 0..clusterCount-1");
+                    "bestOldCluster must be -1 (not set/not enough room) or between 0..clusterCount-1");
                 // Only use this if the memory was allocated for _clusterDistances and bestOldCluster index is valid.
                 if (_clusterDistances != null && bestOldCluster != -1)
                 {
                     // This is dist(cNew,cOld).
-                    Float distanceBetweenOldAndNewClusters = _clusterDistances[newClusterIdxWithinSample, bestOldCluster];
+                    float distanceBetweenOldAndNewClusters = _clusterDistances[newClusterIdxWithinSample, bestOldCluster];
 
                     // Use triangle inequality to evaluate whether weight computation can be avoided
                     // dist(x,cNew) + dist(x,cOld) > dist(cOld,cNew) =>
@@ -581,9 +681,9 @@ namespace Microsoft.ML.Runtime.KMeans
         /// Note that <paramref name="needToStoreWeight"/> is used to avoid the storing the new cluster in
         /// final round. After the final round, best cluster information will be ignored.
         /// </summary>
-        private static void FindBestCluster(ref VBuffer<Float> point, int pointRowIndex, SharedState initializationState,
-            int clusterCount, int clusterPrevCount, VBuffer<Float>[] clusters, Float[] clustersL2s, bool needRealDistanceSquared, bool needToStoreWeight,
-            out Float minDistanceSquared, out int bestCluster)
+        private static void FindBestCluster(in VBuffer<float> point, int pointRowIndex, SharedState initializationState,
+            int clusterCount, int clusterPrevCount, VBuffer<float>[] clusters, float[] clustersL2s, bool needRealDistanceSquared, bool needToStoreWeight,
+            out float minDistanceSquared, out int bestCluster)
         {
             Contracts.AssertValue(initializationState);
             Contracts.Assert(clusterCount > 0);
@@ -596,18 +696,18 @@ namespace Microsoft.ML.Runtime.KMeans
             if (pointRowIndex != -1) // if the space was available for cur in initializationState.
             {
                 // pointNorm is necessary for using triangle inequality.
-                Float pointNorm = VectorUtils.NormSquared(point);
+                float pointNorm = VectorUtils.NormSquared(in point);
                 // We have cached distance information for this point.
                 bestCluster = initializationState.GetBestCluster(pointRowIndex);
-                Float bestWeight = initializationState.GetBestWeight(pointRowIndex);
+                float bestWeight = initializationState.GetBestWeight(pointRowIndex);
                 // This is used by CanWeightComputationBeAvoided function in order to shortcut weight computation.
                 int bestOldCluster = bestCluster;
 
-                Float pointDistanceSquared = pointNorm + bestWeight;
+                float pointDistanceSquared = pointNorm + bestWeight;
                 // Make pointDistanceSquared zero if it is negative, which it can be due to floating point instability.
                 // Do this before taking the square root.
                 pointDistanceSquared = (pointDistanceSquared >= 0.0f) ? pointDistanceSquared : 0.0f;
-                Float pointDistance = MathUtils.Sqrt(pointDistanceSquared);
+                float pointDistance = MathUtils.Sqrt(pointDistanceSquared);
 
                 // bestCluster is the best cluster from 0 to cPrevIdx-1 and bestWeight is the corresponding weight.
                 // So, this loop only needs to process clusters from cPrevIdx.
@@ -617,11 +717,11 @@ namespace Microsoft.ML.Runtime.KMeans
                     {
 #if DEBUG
                         // Lets check if our invariant actually holds
-                        Contracts.Assert(-2 * VectorUtils.DotProduct(ref point, ref clusters[j]) + clustersL2s[j] > bestWeight);
+                        Contracts.Assert(-2 * VectorUtils.DotProduct(in point, in clusters[j]) + clustersL2s[j] > bestWeight);
 #endif
                         continue;
                     }
-                    Float weight = -2 * VectorUtils.DotProduct(ref point, ref clusters[j]) + clustersL2s[j];
+                    float weight = -2 * VectorUtils.DotProduct(in point, in clusters[j]) + clustersL2s[j];
                     if (bestWeight >= weight)
                     {
                         bestWeight = weight;
@@ -642,7 +742,7 @@ namespace Microsoft.ML.Runtime.KMeans
                 // So, we need to go over all clusters to find the best cluster.
                 int discardSecondBestCluster;
                 float discardSecondBestWeight;
-                KMeansUtils.FindBestCluster(ref point, clusters, clustersL2s, clusterCount, needRealDistanceSquared,
+                KMeansUtils.FindBestCluster(in point, clusters, clustersL2s, clusterCount, needRealDistanceSquared,
                     out minDistanceSquared, out bestCluster, out discardSecondBestWeight, out discardSecondBestCluster);
             }
 
@@ -657,24 +757,24 @@ namespace Microsoft.ML.Runtime.KMeans
             out long maxInstancesToAccelerate, out long clusterBytes)
         {
             // Compute the memory requirement for _clusterDistances.
-            clusterBytes = sizeof(Float)
+            clusterBytes = sizeof(float)
                 * numSamplesPerRound            // for each newly added cluster
                 * numRounds * numSamplesPerRound; // for older cluster
 
             // Second, figure out how many instances can be accelerated.
             int bytesPerInstance =
                 sizeof(int)                            // for bestCluster
-                + sizeof(Float)                        // for bestWeight
+                + sizeof(float)                        // for bestWeight
                 + (isParallel ? sizeof(int) + 16 : 0); // for parallel rowCursor index lookup HashArray storage (16 bytes for RowId, 4 bytes for internal 'next' index)
 
             maxInstancesToAccelerate = Math.Max(0, (accelMemBudgetMb * 1024 * 1024 - clusterBytes) / bytesPerInstance);
         }
 
         /// <summary>
-        /// KMeans|| Implementation, see http://theory.stanford.edu/~sergei/papers/vldb12-kmpar.pdf
+        /// KMeans|| Implementation, see https://theory.stanford.edu/~sergei/papers/vldb12-kmpar.pdf
         /// This algorithm will require:
-        /// - (k * overSampleFactor * rounds * diminsionality * 4) bytes for the final sampled clusters.
-        /// - (k * overSampleFactor * numThreads * diminsionality * 4) bytes for the per-round sampling.
+        /// - (k * overSampleFactor * rounds * dimensionality * 4) bytes for the final sampled clusters.
+        /// - (k * overSampleFactor * numThreads * dimensionality * 4) bytes for the per-round sampling.
         ///
         /// Uses memory in initializationState to cache distances and avoids unnecessary distance computations
         /// akin to YinYang-KMeans paper.
@@ -683,17 +783,17 @@ namespace Microsoft.ML.Runtime.KMeans
         /// We store weight in most cases to avoid unnecessary computation of norm(x).
         /// </summary>
         public static void Initialize(IHost host, int numThreads, IChannel ch, FeatureFloatVectorCursor.Factory cursorFactory,
-            int k, int dimensionality, VBuffer<Float>[] centroids, long accelMemBudgetMb,
+            int k, int dimensionality, VBuffer<float>[] centroids, long accelMemBudgetMb,
             out long missingFeatureCount, out long totalTrainingInstances)
         {
             Contracts.CheckValue(host, nameof(host));
             host.CheckValue(ch, nameof(ch));
             ch.CheckValue(cursorFactory, nameof(cursorFactory));
             ch.CheckValue(centroids, nameof(centroids));
-            ch.CheckUserArg(numThreads > 0, nameof(KMeansPlusPlusTrainer.Arguments.NumThreads), "Must be positive");
-            ch.CheckUserArg(k > 0, nameof(KMeansPlusPlusTrainer.Arguments.K), "Must be positive");
+            ch.CheckUserArg(numThreads > 0, nameof(KMeansTrainer.Options.NumberOfThreads), "Must be positive");
+            ch.CheckUserArg(k > 0, nameof(KMeansTrainer.Options.NumberOfClusters), "Must be positive");
             ch.CheckParam(dimensionality > 0, nameof(dimensionality), "Must be positive");
-            ch.CheckUserArg(accelMemBudgetMb >= 0, nameof(KMeansPlusPlusTrainer.Arguments.AccelMemBudgetMb), "Must be non-negative");
+            ch.CheckUserArg(accelMemBudgetMb >= 0, nameof(KMeansTrainer.Options.AccelerationMemoryBudgetMb), "Must be non-negative");
 
             int numRounds;
             int numSamplesPerRound;
@@ -728,9 +828,10 @@ namespace Microsoft.ML.Runtime.KMeans
 
                 // The final chosen points, to be approximately clustered to determine starting
                 // centroids.
-                VBuffer<Float>[] clusters = new VBuffer<Float>[totalSamples];
+                VBuffer<float>[] clusters = new VBuffer<float>[totalSamples];
+
                 // L2s, kept for distance trick.
-                Float[] clustersL2s = new Float[totalSamples];
+                float[] clustersL2s = new float[totalSamples];
 
                 int clusterCount = 0;
                 int clusterPrevCount = -1;
@@ -741,7 +842,7 @@ namespace Microsoft.ML.Runtime.KMeans
                     // sample.
                     Heap<KMeansUtils.WeightedPoint>[] buffer = null;
                     var rowStats = KMeansUtils.ParallelWeightedReservoirSample(host, numThreads, 1, cursorFactory,
-                        (ref VBuffer<Float> point, int pointIndex) => (Float)1.0, (FeatureFloatVectorCursor cur) => -1,
+                        (in VBuffer<float> point, int pointIndex) => (float)1.0, (FeatureFloatVectorCursor cur) => -1,
                         ref clusters, ref buffer);
                     totalTrainingInstances = rowStats.TotalTrainingInstances;
                     missingFeatureCount = rowStats.MissingFeatureCount;
@@ -768,13 +869,13 @@ namespace Microsoft.ML.Runtime.KMeans
                     // to their distance from their best cluster. For each round, this gives us
                     // a new set of 'numSamplesPerRound' instances which are very likely to be as
                     // far from our current total running set of instances as possible.
-                    VBuffer<Float>[] roundSamples = new VBuffer<Float>[numSamplesPerRound];
+                    VBuffer<float>[] roundSamples = new VBuffer<float>[numSamplesPerRound];
 
-                    KMeansUtils.WeightFunc weightFn = (ref VBuffer<Float> point, int pointRowIndex) =>
+                    KMeansUtils.WeightFunc weightFn = (in VBuffer<float> point, int pointRowIndex) =>
                     {
-                        Float distanceSquared;
+                        float distanceSquared;
                         int discardBestCluster;
-                        FindBestCluster(ref point, pointRowIndex, initializationState, clusterCount, clusterPrevCount, clusters,
+                        FindBestCluster(in point, pointRowIndex, initializationState, clusterCount, clusterPrevCount, clusters,
                             clustersL2s, true, true, out distanceSquared, out discardBestCluster);
 
                         return (distanceSquared >= 0.0f) ? distanceSquared : 0.0f;
@@ -795,7 +896,7 @@ namespace Microsoft.ML.Runtime.KMeans
                             clustersL2s[clusterCount] = VectorUtils.NormSquared(clusters[clusterCount]);
 
                             for (int j = 0; j < clusterPrevCount; j++)
-                                initializationState.SetClusterDistance(i, ref clusters[clusterCount], clustersL2s[clusterCount], j, ref clusters[j], clustersL2s[j]);
+                                initializationState.SetClusterDistance(i, in clusters[clusterCount], clustersL2s[clusterCount], j, in clusters[j], clustersL2s[j]);
 
                             clusterCount++;
                         }
@@ -809,42 +910,42 @@ namespace Microsoft.ML.Runtime.KMeans
                 // Finally, we do one last pass through the dataset, finding for
                 // each instance the closest chosen cluster instance and summing these into buckets to be used
                 // to weight each one of our candidate chosen clusters.
-                Float[][] weightBuffer = null;
-                Float[] totalWeights = null;
-                KMeansUtils.ParallelMapReduce<Float[], Float[]>(
+                float[][] weightBuffer = null;
+                float[] totalWeights = null;
+                KMeansUtils.ParallelMapReduce<float[], float[]>(
                     numThreads, host, cursorFactory, initializationState.RowIndexGetter,
-                    (ref Float[] weights) => weights = new Float[totalSamples],
-                    (ref VBuffer<Float> point, int pointRowIndex, Float[] weights, IRandom rand) =>
+                    (ref float[] weights) => weights = new float[totalSamples],
+                    (ref VBuffer<float> point, int pointRowIndex, float[] weights, Random rand) =>
                     {
                         int bestCluster;
-                        Float discardBestWeight;
-                        FindBestCluster(ref point, pointRowIndex, initializationState, clusterCount, clusterPrevCount, clusters,
+                        float discardBestWeight;
+                        FindBestCluster(in point, pointRowIndex, initializationState, clusterCount, clusterPrevCount, clusters,
                             clustersL2s, false, false, out discardBestWeight, out bestCluster);
 #if DEBUG
-                        int debugBestCluster = KMeansUtils.FindBestCluster(ref point, clusters, clustersL2s);
+                        int debugBestCluster = KMeansUtils.FindBestCluster(in point, clusters, clustersL2s);
                         ch.Assert(bestCluster == debugBestCluster);
 #endif
                         weights[bestCluster]++;
                     },
-                    (Float[][] workStateWeights, IRandom rand, ref Float[] weights) =>
+                    (float[][] workStateWeights, Random rand, ref float[] weights) =>
                     {
-                        weights = new Float[totalSamples];
+                        weights = new float[totalSamples];
                         for (int i = 0; i < workStateWeights.Length; i++)
                             CpuMathUtils.Add(workStateWeights[i], weights, totalSamples);
                     },
                     ref weightBuffer, ref totalWeights);
 #if DEBUG
                 // This is running the original code to make sure that the new code matches the semantic of the original code.
-                Float[] debugTotalWeights = null;
+                float[] debugTotalWeights = null;
 
-                Float[][] debugWeightBuffer = null;
-                KMeansUtils.ParallelMapReduce<Float[], Float[]>(
+                float[][] debugWeightBuffer = null;
+                KMeansUtils.ParallelMapReduce<float[], float[]>(
                     numThreads, host, cursorFactory, (FeatureFloatVectorCursor cur) => -1,
-                    (ref Float[] weights) => weights = new Float[totalSamples],
-                    (ref VBuffer<Float> point, int discard, Float[] weights, IRandom rand) => weights[KMeansUtils.FindBestCluster(ref point, clusters, clustersL2s)]++,
-                    (Float[][] workStateWeights, IRandom rand, ref Float[] weights) =>
+                    (ref float[] weights) => weights = new float[totalSamples],
+                    (ref VBuffer<float> point, int discard, float[] weights, Random rand) => weights[KMeansUtils.FindBestCluster(in point, clusters, clustersL2s)]++,
+                    (float[][] workStateWeights, Random rand, ref float[] weights) =>
                     {
-                        weights = new Float[totalSamples];
+                        weights = new float[totalSamples];
                         for (int i = 0; i < workStateWeights.Length; i++)
                             for (int j = 0; j < workStateWeights[i].Length; j++)
                                 weights[j] += workStateWeights[i][j];
@@ -870,8 +971,8 @@ namespace Microsoft.ML.Runtime.KMeans
                 else
                 {
                     ArrayDataViewBuilder arrDv = new ArrayDataViewBuilder(host);
-                    arrDv.AddColumn(DefaultColumnNames.Features, PrimitiveType.FromKind(DataKind.R4), clusters);
-                    arrDv.AddColumn(DefaultColumnNames.Weight, PrimitiveType.FromKind(DataKind.R4), totalWeights);
+                    arrDv.AddColumn(DefaultColumnNames.Features, NumberDataViewType.Single, clusters);
+                    arrDv.AddColumn(DefaultColumnNames.Weight, NumberDataViewType.Single, totalWeights);
                     var subDataViewCursorFactory = new FeatureFloatVectorCursor.Factory(
                         new RoleMappedData(arrDv.GetDataView(), null, DefaultColumnNames.Features, weight: DefaultColumnNames.Weight), CursOpt.Weight | CursOpt.Features);
                     long discard1;
@@ -889,15 +990,15 @@ namespace Microsoft.ML.Runtime.KMeans
         /// </summary>
         public static void Initialize(
             IHost host, int numThreads, IChannel ch, FeatureFloatVectorCursor.Factory cursorFactory,
-            int k, VBuffer<Float>[] centroids,
+            int k, VBuffer<float>[] centroids,
             out long missingFeatureCount, out long totalTrainingInstances)
         {
             using (var pCh = host.StartProgressChannel("KMeansRandomInitialize"))
             {
                 Heap<KMeansUtils.WeightedPoint>[] buffer = null;
-                VBuffer<Float>[] outCentroids = null;
+                VBuffer<float>[] outCentroids = null;
                 var rowStats = KMeansUtils.ParallelWeightedReservoirSample(host, numThreads, k, cursorFactory,
-                    (ref VBuffer<Float> point, int pointRowIndex) => 1f, (FeatureFloatVectorCursor cur) => -1,
+                    (in VBuffer<float> point, int pointRowIndex) => 1f, (FeatureFloatVectorCursor cur) => -1,
                     ref outCentroids, ref buffer);
                 missingFeatureCount = rowStats.MissingFeatureCount;
                 totalTrainingInstances = rowStats.TotalTrainingInstances;
@@ -916,15 +1017,15 @@ namespace Microsoft.ML.Runtime.KMeans
             protected readonly long MaxInstancesToAccelerate;
 
             // Standard KMeans per-cluster data.
-            protected readonly VBuffer<Float>[] Centroids;
+            protected readonly VBuffer<float>[] Centroids;
             protected readonly long[] ClusterSizes;
 
             // YinYang per-cluster data.
             // cached sum of the first maxInstancesToAccelerate instances assigned to cluster i for 0 <= i < _k
-            protected readonly VBuffer<Float>[] CachedSum;
+            protected readonly VBuffer<float>[] CachedSum;
 
 #if DEBUG
-            public VBuffer<Float>[] CachedSumDebug { get { return CachedSum; } }
+            public VBuffer<float>[] CachedSumDebug { get { return CachedSum; } }
 #endif
 
             protected double PreviousAverageScore;
@@ -955,17 +1056,17 @@ namespace Microsoft.ML.Runtime.KMeans
 
             protected WorkChunkStateBase(long maxInstancesToAccelerate, int k, int dimensionality)
             {
-                Centroids = new VBuffer<Float>[k];
+                Centroids = new VBuffer<float>[k];
                 for (int j = 0; j < k; j++)
-                    Centroids[j] = VBufferUtils.CreateDense<Float>(dimensionality);
+                    Centroids[j] = VBufferUtils.CreateDense<float>(dimensionality);
 
                 ClusterSizes = new long[k];
 
                 if (maxInstancesToAccelerate > 0)
                 {
-                    CachedSum = new VBuffer<Float>[k];
+                    CachedSum = new VBuffer<float>[k];
                     for (int j = 0; j < k; j++)
-                        CachedSum[j] = VBufferUtils.CreateDense<Float>(dimensionality);
+                        CachedSum[j] = VBufferUtils.CreateDense<float>(dimensionality);
                 }
 
                 K = k;
@@ -1008,19 +1109,19 @@ namespace Microsoft.ML.Runtime.KMeans
                 GloballyFiltered++;
             }
 
-            public void UpdateClusterAssignment(bool firstIteration, ref VBuffer<Float> features, int cluster, int previousCluster, Float distance)
+            public void UpdateClusterAssignment(bool firstIteration, in VBuffer<float> features, int cluster, int previousCluster, float distance)
             {
                 if (firstIteration)
                 {
-                    VectorUtils.Add(ref features, ref CachedSum[cluster]);
+                    VectorUtils.Add(in features, ref CachedSum[cluster]);
                     NumChanged++;
                 }
                 else if (previousCluster != cluster)
                 {
                     // update the cachedSum as the instance moves from (previous) bestCluster[n] to cluster
-                    VectorUtils.Add(ref features, ref CachedSum[cluster]);
+                    VectorUtils.Add(in features, ref CachedSum[cluster]);
                     // There doesnt seem to be a Subtract function that does a -= b, so doing a += (-1 * b)
-                    VectorUtils.AddMult(ref features, -1, ref CachedSum[previousCluster]);
+                    VectorUtils.AddMult(in features, -1, ref CachedSum[previousCluster]);
                     NumChanged++;
                 }
                 else
@@ -1029,13 +1130,13 @@ namespace Microsoft.ML.Runtime.KMeans
                 UpdateClusterAssignmentMetrics(cluster, distance);
             }
 
-            public void UpdateClusterAssignment(ref VBuffer<Float> features, int cluster, Float distance)
+            public void UpdateClusterAssignment(in VBuffer<float> features, int cluster, float distance)
             {
-                VectorUtils.Add(ref features, ref Centroids[cluster]);
+                VectorUtils.Add(in features, ref Centroids[cluster]);
                 UpdateClusterAssignmentMetrics(cluster, distance);
             }
 
-            private void UpdateClusterAssignmentMetrics(int cluster, Float distance)
+            private void UpdateClusterAssignmentMetrics(int cluster, float distance)
             {
                 _n++;
                 ClusterSizes[cluster]++;
@@ -1060,8 +1161,8 @@ namespace Microsoft.ML.Runtime.KMeans
                     for (int j = 0; j < reducedState.ClusterSizes.Length; j++)
                     {
                         reducedState.ClusterSizes[j] += workChunkArr[i].ClusterSizes[j];
-                        VectorUtils.Add(ref workChunkArr[i].CachedSum[j], ref reducedState.CachedSum[j]);
-                        VectorUtils.Add(ref workChunkArr[i].Centroids[j], ref reducedState.Centroids[j]);
+                        VectorUtils.Add(in workChunkArr[i].CachedSum[j], ref reducedState.CachedSum[j]);
+                        VectorUtils.Add(in workChunkArr[i].Centroids[j], ref reducedState.Centroids[j]);
                     }
 
                     workChunkArr[i].Clear(keepCachedSums: false);
@@ -1099,7 +1200,7 @@ namespace Microsoft.ML.Runtime.KMeans
             /// of cluster assignment. It is assumed that centroids will contain the previous results
             /// of this call.
             /// </summary>
-            public void UpdateClusters(VBuffer<Float>[] centroids, Float[] centroidL2s, Float[] deltas, ref Float deltaMax)
+            public void UpdateClusters(VBuffer<float>[] centroids, float[] centroidL2s, float[] deltas, ref float deltaMax)
             {
                 bool isAccelerated = MaxInstancesToAccelerate > 0;
                 deltaMax = 0;
@@ -1107,14 +1208,14 @@ namespace Microsoft.ML.Runtime.KMeans
                 for (int i = 0; i < K; i++)
                 {
                     if (isAccelerated)
-                        VectorUtils.Add(ref CachedSum[i], ref Centroids[i]);
+                        VectorUtils.Add(in CachedSum[i], ref Centroids[i]);
 
                     if (ClusterSizes[i] > 1)
-                        VectorUtils.ScaleBy(ref Centroids[i], (Float)(1.0 / ClusterSizes[i]));
+                        VectorUtils.ScaleBy(ref Centroids[i], (float)(1.0 / ClusterSizes[i]));
 
                     if (isAccelerated)
                     {
-                        Float clusterDelta = MathUtils.Sqrt(VectorUtils.L2DistSquared(ref Centroids[i], ref centroids[i]));
+                        float clusterDelta = MathUtils.Sqrt(VectorUtils.L2DistSquared(in Centroids[i], in centroids[i]));
 
                         deltas[i] = clusterDelta;
                         if (deltaMax < clusterDelta)
@@ -1147,9 +1248,9 @@ namespace Microsoft.ML.Runtime.KMeans
             // YinYang  data.
 
             // the distance between the old and the new center for each cluster
-            public readonly Float[] Delta;
+            public readonly float[] Delta;
             // max value of delta[i] for 0 <= i < _k
-            public Float DeltaMax;
+            public float DeltaMax;
 
             // Per instance structures
 
@@ -1162,9 +1263,9 @@ namespace Microsoft.ML.Runtime.KMeans
             private readonly int[] _bestCluster;
 
             // upper bound on the distance of an instance to its bestCluster
-            private readonly Float[] _upperBound;
+            private readonly float[] _upperBound;
             // lower bound on the distance of an instance to every cluster other than its bestCluster
-            private readonly Float[] _lowerBound;
+            private readonly float[] _lowerBound;
 
             public SharedState(FeatureFloatVectorCursor.Factory factory, IChannel ch, long baseMaxInstancesToAccelerate, int k,
                 bool isParallel, long totalTrainingInstances)
@@ -1181,11 +1282,11 @@ namespace Microsoft.ML.Runtime.KMeans
                 if (MaxInstancesToAccelerate > 0)
                 {
                     // allocate data structures
-                    Delta = new Float[k];
+                    Delta = new float[k];
 
                     _bestCluster = new int[MaxInstancesToAccelerate];
-                    _upperBound = new Float[MaxInstancesToAccelerate];
-                    _lowerBound = new Float[MaxInstancesToAccelerate];
+                    _upperBound = new float[MaxInstancesToAccelerate];
+                    _lowerBound = new float[MaxInstancesToAccelerate];
                 }
             }
 
@@ -1194,14 +1295,14 @@ namespace Microsoft.ML.Runtime.KMeans
             /// to its closer and second closed cluster, as well as the identity of the new
             /// closest cluster. This method returns the last known closest cluster.
             /// </summary>
-            public int SetYinYangCluster(int n, ref VBuffer<Float> features, Float minDistance, int minCluster, Float secMinDistance)
+            public int SetYinYangCluster(int n, in VBuffer<float> features, float minDistance, int minCluster, float secMinDistance)
             {
                 if (n == -1)
                     return -1;
 
                 // update upper and lower bound
                 // updates have to be true distances to use triangular inequality
-                Float instanceNormSquared = VectorUtils.NormSquared(features);
+                float instanceNormSquared = VectorUtils.NormSquared(in features);
                 _upperBound[n] = MathUtils.Sqrt(instanceNormSquared + minDistance);
                 _lowerBound[n] = MathUtils.Sqrt(instanceNormSquared + secMinDistance);
                 int previousCluster = _bestCluster[n];
@@ -1230,16 +1331,16 @@ namespace Microsoft.ML.Runtime.KMeans
             }
 
 #if DEBUG
-            public void AssertValidYinYangBounds(int n, ref VBuffer<Float> features, VBuffer<Float>[] centroids)
+            public void AssertValidYinYangBounds(int n, in VBuffer<float> features, VBuffer<float>[] centroids)
             {
                 // Assert that the global filter is indeed doing the right thing
-                Float bestDistance = MathUtils.Sqrt(VectorUtils.L2DistSquared(ref features, ref centroids[_bestCluster[n]]));
+                float bestDistance = MathUtils.Sqrt(VectorUtils.L2DistSquared(in features, in centroids[_bestCluster[n]]));
                 Contracts.Assert(KMeansLloydsYinYangTrain.AlmostLeq(bestDistance, _upperBound[n]));
                 for (int j = 0; j < centroids.Length; j++)
                 {
                     if (j == _bestCluster[n])
                         continue;
-                    Float distance = MathUtils.Sqrt(VectorUtils.L2DistSquared(ref features, ref centroids[j]));
+                    float distance = MathUtils.Sqrt(VectorUtils.L2DistSquared(in features, in centroids[j]));
 
                     Contracts.Assert(AlmostLeq(_lowerBound[n], distance));
                 }
@@ -1249,17 +1350,17 @@ namespace Microsoft.ML.Runtime.KMeans
 
         public static void Train(IHost host, int numThreads, IChannel ch, FeatureFloatVectorCursor.Factory cursorFactory,
             long totalTrainingInstances, int k, int dimensionality, int maxIterations,
-            long accelMemBudgetInMb, Float convergenceThreshold, VBuffer<Float>[] centroids)
+            long accelMemBudgetInMb, float convergenceThreshold, VBuffer<float>[] centroids)
         {
             SharedState state;
             WorkChunkState[] workState;
             ReducedWorkChunkState reducedState;
             Initialize(ch, cursorFactory, totalTrainingInstances, numThreads, k, dimensionality, accelMemBudgetInMb,
                 out state, out workState, out reducedState);
-            Float[] centroidL2s = new Float[k];
+            float[] centroidL2s = new float[k];
 
             for (int i = 0; i < k; i++)
-                centroidL2s[i] = VectorUtils.NormSquared(centroids[i]);
+                centroidL2s[i] = VectorUtils.NormSquared(in centroids[i]);
 
             using (var pch = host.StartProgressChannel("KMeansTrain"))
             {
@@ -1309,9 +1410,9 @@ namespace Microsoft.ML.Runtime.KMeans
                     if (state.IsAccelerated)
                     {
                         // Assert that cachedSum[i] is equal to the sum of the first maxInstancesToAccelerate instances assigned to cluster i
-                        var cachedSumCopy = new VBuffer<Float>[k];
+                        var cachedSumCopy = new VBuffer<float>[k];
                         for (int i = 0; i < k; i++)
-                            cachedSumCopy[i] = VBufferUtils.CreateDense<Float>(dimensionality);
+                            cachedSumCopy[i] = VBufferUtils.CreateDense<float>(dimensionality);
 
                         using (var cursor = cursorFactory.Create())
                         {
@@ -1321,7 +1422,7 @@ namespace Microsoft.ML.Runtime.KMeans
                                 int id = state.RowIndexGetter(cursor);
                                 if (id != -1)
                                 {
-                                    VectorUtils.Add(ref cursor.Features, ref cachedSumCopy[state.GetBestCluster(id)]);
+                                    VectorUtils.Add(in cursor.Features, ref cachedSumCopy[state.GetBestCluster(id)]);
                                     numCounted++;
                                 }
                             }
@@ -1329,8 +1430,10 @@ namespace Microsoft.ML.Runtime.KMeans
 
                         for (int i = 0; i < k; i++)
                         {
+                            var reducedStateCacheValues = reducedState.CachedSumDebug[i].GetValues();
+                            var cachedSumCopyValues = cachedSumCopy[i].GetValues();
                             for (int j = 0; j < dimensionality; j++)
-                                Contracts.Assert(AlmostEq(reducedState.CachedSumDebug[i].Values[j], cachedSumCopy[i].Values[j]));
+                                Contracts.Assert(AlmostEq(reducedStateCacheValues[j], cachedSumCopyValues[j]));
                         }
                     }
 #endif
@@ -1357,17 +1460,17 @@ namespace Microsoft.ML.Runtime.KMeans
             int neededPerThreadWorkStates = numThreads == 1 ? 0 : numThreads;
 
             // Accelerating KMeans requires the following data structures.
-            // The algorithm is based on the YinYang KMeans algorithm [ICML'15], http://research.microsoft.com/apps/pubs/default.aspx?id=252149
+            // The algorithm is based on the YinYang KMeans algorithm [ICML'15], https://research.microsoft.com/apps/pubs/default.aspx?id=252149
             // These data structures are allocated only as allowed by the _accelMemBudgetMb parameter
             // if _accelMemBudgetMb is zero, then the algorithm below reduces to the original KMeans++ implementation
             int bytesPerCluster =
-                sizeof(Float) +                                 // for delta
-                sizeof(Float) * dimensionality * (neededPerThreadWorkStates + 1);  // for cachedSum
+                sizeof(float) +                                 // for delta
+                sizeof(float) * dimensionality * (neededPerThreadWorkStates + 1);  // for cachedSum
 
             int bytesPerInstance =
                 sizeof(int) +                             // for bestCluster
-                sizeof(Float) +                           // for upperBound
-                sizeof(Float) +                           // for lowerBound
+                sizeof(float) +                           // for upperBound
+                sizeof(float) +                           // for lowerBound
                 (numThreads > 1 ? sizeof(int) + 16 : 0); // for parallel rowCursor index lookup HashArray storage (16 bytes for RowId, 4 bytes for internal 'next' index)
 
             long maxInstancesToAccelerate = Math.Max(0, (accelMemBudgetMb * 1024 * 1024 - bytesPerCluster * k) / bytesPerInstance);
@@ -1382,7 +1485,7 @@ namespace Microsoft.ML.Runtime.KMeans
         /// this chunk will be one of _numThreads chunks and the RowCursor will be part of a RowCursorSet. In the
         /// unthreaded version, this chunk will be the final chunk and hold state for the entire data set.
         /// </summary>
-        private static void ProcessChunk(FeatureFloatVectorCursor cursor, SharedState state, WorkChunkStateBase chunkState, int k, VBuffer<Float>[] centroids, Float[] centroidL2s)
+        private static void ProcessChunk(FeatureFloatVectorCursor cursor, SharedState state, WorkChunkStateBase chunkState, int k, VBuffer<float>[] centroids, float[] centroidL2s)
         {
             while (cursor.MoveNext())
             {
@@ -1397,24 +1500,24 @@ namespace Microsoft.ML.Runtime.KMeans
                     {
                         chunkState.KeepYinYangAssignment(state.GetBestCluster(n));
 #if DEBUG
-                        state.AssertValidYinYangBounds(n, ref cursor.Features, centroids);
+                        state.AssertValidYinYangBounds(n, in cursor.Features, centroids);
 #endif
                         continue;
                     }
                 }
 
-                Float minDistance;
-                Float secMinDistance;
+                float minDistance;
+                float secMinDistance;
                 int cluster;
                 int secCluster;
-                KMeansUtils.FindBestCluster(ref cursor.Features, centroids, centroidL2s, k, false, out minDistance, out cluster, out secMinDistance, out secCluster);
+                KMeansUtils.FindBestCluster(in cursor.Features, centroids, centroidL2s, k, false, out minDistance, out cluster, out secMinDistance, out secCluster);
 
                 if (n == -1)
-                    chunkState.UpdateClusterAssignment(ref cursor.Features, cluster, minDistance);
+                    chunkState.UpdateClusterAssignment(in cursor.Features, cluster, minDistance);
                 else
                 {
-                    int prevCluster = state.SetYinYangCluster(n, ref cursor.Features, minDistance, cluster, secMinDistance);
-                    chunkState.UpdateClusterAssignment(firstIteration, ref cursor.Features, cluster, prevCluster, minDistance);
+                    int prevCluster = state.SetYinYangCluster(n, in cursor.Features, minDistance, cluster, secMinDistance);
+                    chunkState.UpdateClusterAssignment(firstIteration, in cursor.Features, cluster, prevCluster, minDistance);
                 }
             }
         }
@@ -1422,7 +1525,7 @@ namespace Microsoft.ML.Runtime.KMeans
 #if DEBUG
         private const Double FloatingPointErrorThreshold = 0.1F;
 
-        private static bool AlmostEq(Float af, Float bf)
+        private static bool AlmostEq(float af, float bf)
         {
             Double a = (Double)af;
             Double b = (Double)bf;
@@ -1446,7 +1549,7 @@ namespace Microsoft.ML.Runtime.KMeans
             return false;
         }
 
-        private static bool AlmostLeq(Float a, Float b)
+        private static bool AlmostLeq(float a, float b)
         {
             if (AlmostEq(a, b))
                 return true;
@@ -1461,7 +1564,7 @@ namespace Microsoft.ML.Runtime.KMeans
         public struct WeightedPoint
         {
             public double Weight;
-            public VBuffer<Float> Point;
+            public VBuffer<float> Point;
         }
 
         public struct RowStats
@@ -1470,27 +1573,27 @@ namespace Microsoft.ML.Runtime.KMeans
             public long TotalTrainingInstances;
         }
 
-        public delegate Float WeightFunc(ref VBuffer<Float> point, int pointRowIndex);
+        public delegate float WeightFunc(in VBuffer<float> point, int pointRowIndex);
 
         /// <summary>
-        /// Performs a multithreaded version of weighted reservior sampling, returning
+        /// Performs a multithreaded version of weighted reservoir sampling, returning
         /// an array of numSamples, where each sample has been selected from the
         /// data set with a probability of numSamples/N * weight/(sum(weight)). Buffer
         /// is sized to the number of threads plus one and stores the minheaps needed to
-        /// perform the per-thread reservior samples.
+        /// perform the per-thread reservoir samples.
         ///
         /// This method assumes that the numSamples is much smaller than the full dataset as
         /// it expects to be able to sample numSamples * numThreads.
         ///
         /// This is based on the 'A-Res' algorithm in 'Weighted Random Sampling', 2005; Efraimidis, Spirakis:
-        /// http://utopia.duth.gr/~pefraimi/research/data/2007EncOfAlg.pdf
+        /// https://utopia.duth.gr/~pefraimi/research/data/2007EncOfAlg.pdf
         /// </summary>
         public static RowStats ParallelWeightedReservoirSample(
             IHost host, int numThreads,
             int numSamples, FeatureFloatVectorCursor.Factory factory,
             WeightFunc weightFn,
             RowIndexGetter rowIndexGetter,
-            ref VBuffer<Float>[] dst,
+            ref VBuffer<float>[] dst,
             ref Heap<WeightedPoint>[] buffer)
         {
             host.AssertValue(host);
@@ -1509,22 +1612,22 @@ namespace Microsoft.ML.Runtime.KMeans
                     else
                         heap.Clear();
                 },
-                (ref VBuffer<Float> point, int pointRowIndex, Heap<WeightedPoint> heap, IRandom rand) =>
+                (ref VBuffer<float> point, int pointRowIndex, Heap<WeightedPoint> heap, Random rand) =>
                 {
                     // We use distance as a proxy for 'is the same point'. By excluding
                     // all points that lie within a very small distance of our current set of
                     // centroids we force the algorithm to explore more broadly and avoid creating a
                     // set of centroids containing the same, or very close to the same, point
                     // more than once.
-                    Float sameClusterEpsilon = (Float)1e-15;
+                    float sameClusterEpsilon = (float)1e-15;
 
-                    Float weight = weightFn(ref point, pointRowIndex);
+                    float weight = weightFn(in point, pointRowIndex);
 
                     // If numeric instability has forced it to zero, then we bound it to epsilon to
                     // keep the key valid and avoid NaN, (although the math does tend to work out regardless:
                     // 1 / 0 => Inf, base ^ Inf => 0, when |base| < 1)
                     if (weight == 0)
-                        weight = Float.Epsilon;
+                        weight = float.Epsilon;
 
                     if (weight <= sameClusterEpsilon)
                         return;
@@ -1545,7 +1648,7 @@ namespace Microsoft.ML.Runtime.KMeans
                     Utils.Swap(ref wRow.Point, ref point);
                     heap.Add(wRow);
                 },
-                (Heap<WeightedPoint>[] heaps, IRandom rand, ref Heap<WeightedPoint> finalHeap) =>
+                (Heap<WeightedPoint>[] heaps, Random rand, ref Heap<WeightedPoint> finalHeap) =>
                 {
                     host.Assert(finalHeap == null);
                     finalHeap = new Heap<WeightedPoint>((x, y) => x.Weight > y.Weight, numSamples);
@@ -1584,13 +1687,13 @@ namespace Microsoft.ML.Runtime.KMeans
 
         public delegate void InitAction<TPartitionState>(ref TPartitionState val);
         public delegate int RowIndexGetter(FeatureFloatVectorCursor cur);
-        public delegate void MapAction<TPartitionState>(ref VBuffer<Float> point, int rowIndex, TPartitionState state, IRandom rand);
-        public delegate void ReduceAction<TPartitionState, TGlobalState>(TPartitionState[] intermediates, IRandom rand, ref TGlobalState result);
+        public delegate void MapAction<TPartitionState>(ref VBuffer<float> point, int rowIndex, TPartitionState state, Random rand);
+        public delegate void ReduceAction<TPartitionState, TGlobalState>(TPartitionState[] intermediates, Random rand, ref TGlobalState result);
 
         /// <summary>
         /// Takes a data cursor and perform an in-memory parallel aggregation operation on it. This
-        /// helper wraps some of the behavior common to parallel operations over a IRowCursor set,
-        /// including building the set, creating separate IRandom instances, and IRowCursor disposal.
+        /// helper wraps some of the behavior common to parallel operations over a <see cref="DataViewRowCursor"/> set,
+        /// including building the set, creating separate Random instances, and <see cref="DataViewRowCursor"/> disposal.
         /// </summary>
         /// <typeparam name="TPartitionState">The type that each parallel cursor will be expected to aggregate to.</typeparam>
         /// <typeparam name="TGlobalState">The type of the final output from combining each per-thread instance of TInterAgg.</typeparam>
@@ -1625,7 +1728,7 @@ namespace Microsoft.ML.Runtime.KMeans
                 var cur = set[i];
                 initChunk(ref buffer[i]);
                 var innerWorkState = buffer[i];
-                IRandom rand = RandomUtils.Create(baseHost.Rand);
+                Random rand = RandomUtils.Create(baseHost.Rand);
                 workArr[i] = () =>
                 {
                     using (cur)
@@ -1648,22 +1751,22 @@ namespace Microsoft.ML.Runtime.KMeans
             };
         }
 
-        public static int FindBestCluster(ref VBuffer<Float> features, VBuffer<Float>[] centroids, Float[] centroidL2s)
+        public static int FindBestCluster(in VBuffer<float> features, VBuffer<float>[] centroids, float[] centroidL2s)
         {
-            Float discard1;
-            Float discard2;
+            float discard1;
+            float discard2;
             int discard3;
             int cluster;
-            FindBestCluster(ref features, centroids, centroidL2s, centroids.Length, false, out discard1, out cluster, out discard2, out discard3);
+            FindBestCluster(in features, centroids, centroidL2s, centroids.Length, false, out discard1, out cluster, out discard2, out discard3);
             return cluster;
         }
 
-        public static int FindBestCluster(ref VBuffer<Float> features, VBuffer<Float>[] centroids, Float[] centroidL2s, int centroidCount, bool realWeight, out Float minDistance)
+        public static int FindBestCluster(in VBuffer<float> features, VBuffer<float>[] centroids, float[] centroidL2s, int centroidCount, bool realWeight, out float minDistance)
         {
-            Float discard1;
+            float discard1;
             int discard2;
             int cluster;
-            FindBestCluster(ref features, centroids, centroidL2s, centroidCount, realWeight, out minDistance, out cluster, out discard1, out discard2);
+            FindBestCluster(in features, centroids, centroidL2s, centroidCount, realWeight, out minDistance, out cluster, out discard1, out discard2);
             return cluster;
         }
 
@@ -1682,15 +1785,15 @@ namespace Microsoft.ML.Runtime.KMeans
         /// <param name="secMinDistance">The second nearest distance, or PosInf if <paramref name="centroids" /> only contains a single point.</param>
         /// <param name="secCluster">The index of the second nearest centroid, or -1 if <paramref name="centroids" /> only contains a single point.</param>
         public static void FindBestCluster(
-            ref VBuffer<Float> features,
-            VBuffer<Float>[] centroids, Float[] centroidL2s, int centroidCount, bool needRealDistance,
-            out Float minDistance, out int cluster, out Float secMinDistance, out int secCluster)
+            in VBuffer<float> features,
+            VBuffer<float>[] centroids, float[] centroidL2s, int centroidCount, bool needRealDistance,
+            out float minDistance, out int cluster, out float secMinDistance, out int secCluster)
         {
             Contracts.Assert(centroids.Length >= centroidCount && centroidL2s.Length >= centroidCount && centroidCount > 0);
             Contracts.Assert(features.Length == centroids[0].Length);
 
-            minDistance = Float.PositiveInfinity;
-            secMinDistance = Float.PositiveInfinity;
+            minDistance = float.PositiveInfinity;
+            secMinDistance = float.PositiveInfinity;
             cluster = 0; // currently assigned cluster to the instance
             secCluster = -1;
 
@@ -1698,7 +1801,7 @@ namespace Microsoft.ML.Runtime.KMeans
             {
                 // this is not a real distance, since we don't add L2 norm of the instance
                 // This won't affect minimum calculations, and total score will just be lowered by sum(L2 norms)
-                Float distance = -2 * VectorUtils.DotProduct(ref features, ref centroids[j]) + centroidL2s[j];
+                float distance = -2 * VectorUtils.DotProduct(in features, in centroids[j]) + centroidL2s[j];
 
                 if (distance <= minDistance)
                 {
@@ -1721,7 +1824,7 @@ namespace Microsoft.ML.Runtime.KMeans
 
             if (needRealDistance)
             {
-                Float l2 = VectorUtils.NormSquared(features);
+                float l2 = VectorUtils.NormSquared(in features);
                 minDistance += l2;
                 if (secCluster != -1)
                     secMinDistance += l2;
@@ -1731,7 +1834,7 @@ namespace Microsoft.ML.Runtime.KMeans
         /// <summary>
         /// Checks that all coordinates of all centroids are finite, and throws otherwise
         /// </summary>
-        public static void VerifyModelConsistency(VBuffer<Float>[] centroids)
+        public static void VerifyModelConsistency(VBuffer<float>[] centroids)
         {
             foreach (var centroid in centroids)
                 Contracts.Check(centroid.Items().Select(x => x.Value).All(FloatUtils.IsFinite), "Model training failed: non-finite coordinates are generated");

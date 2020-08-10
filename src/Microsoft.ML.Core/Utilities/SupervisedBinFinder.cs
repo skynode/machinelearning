@@ -2,27 +2,27 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
-using Float = System.Single;
-
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using Microsoft.ML.Runtime;
 
-namespace Microsoft.ML.Runtime.Internal.Utilities
+namespace Microsoft.ML.Internal.Utilities
 {
     /// <summary>
     /// This class performs discretization of (value, label) pairs into bins in a way that minimizes
     /// the target function "minimum description length".
-    /// The algorithm is outlineed in an article
+    /// The algorithm is outlined in an article
     /// "Multi-Interval Discretization of Continuous-Valued Attributes for Classification Learning"
-    /// [Fayyad, Usama M.; Irani, Keki B. (1993)] http://ijcai.org/Past%20Proceedings/IJCAI-93-VOL2/PDF/022.pdf
+    /// [Fayyad, Usama M.; Irani, Keki B. (1993)] https://ijcai.org/Past%20Proceedings/IJCAI-93-VOL2/PDF/022.pdf
     ///
     /// The class can be used several times sequentially, it is stateful and not thread-safe.
     /// Both Single and Double precision processing is implemented, and is identical.
     /// </summary>
-    public sealed class SupervisedBinFinder
+    [BestFriend]
+    internal sealed class SupervisedBinFinder
     {
-        private struct ValuePair<T> : IComparable<ValuePair<T>>
+        private readonly struct ValuePair<T> : IComparable<ValuePair<T>>
             where T : IComparable<T>
         {
             public readonly T Value;

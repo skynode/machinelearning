@@ -5,8 +5,10 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Security;
+using Microsoft.ML.Runtime;
 
-namespace Microsoft.ML.Runtime.FastTree.Internal
+namespace Microsoft.ML.Trainers.FastTree
 {
 #if USE_SINGLE_PRECISION
     using FloatType = System.Single;
@@ -233,7 +235,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
         /// Writes a binary representation of this class to a byte buffer, at a given position.
         /// The position is incremented to the end of the representation
         /// </summary>
-        /// <param name="buffer">a byte array where the binary represenaion is written</param>
+        /// <param name="buffer">a byte array where the binary representation is written</param>
         /// <param name="position">the position in the byte array</param>
         public override void ToByteArray(byte[] buffer, ref int position)
         {
@@ -249,11 +251,6 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
         }
 
         public override IntArrayType Type { get { return IntArrayType.Sparse; } }
-
-        public override MD5Hash MD5Hash
-        {
-            get { return MD5Hasher.Hash(_deltas) ^ _values.MD5Hash; }
-        }
 
         public override IntArray Clone(IntArrayBits bitsPerItem, IntArrayType type)
         {
@@ -489,12 +486,13 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
         }
 
 #if USE_FASTTREENATIVE
-        [DllImport("FastTreeNative", CallingConvention = CallingConvention.StdCall)]
+        internal const string NativePath = "FastTreeNative";
+        [DllImport(NativePath), SuppressUnmanagedCodeSecurity]
         private static extern unsafe int C_SumupDeltaSparse_float(int numBits, byte* pValues, byte* pDeltas, int numDeltas, int* pIndices, float* pSampleOutputs, double* pSampleOutputWeights,
                                   float* pSumTargetsByBin, double* pSumTargets2ByBin, int* pCountByBin,
                                   int totalCount, double totalSampleOutputs, double totalSampleOutputWeights);
 
-        [DllImport("FastTreeNative", CallingConvention = CallingConvention.StdCall)]
+        [DllImport(NativePath), SuppressUnmanagedCodeSecurity]
         private static extern unsafe int C_SumupDeltaSparse_double(int numBits, byte* pValues, byte* pDeltas, int numDeltas, int* pIndices, double* pSampleOutputs, double* pSampleOutputWeights,
                                   double* pSumTargetsByBin, double* pSumTargets2ByBin, int* pCountByBin,
                                   int totalCount, double totalSampleOutputs, double totalSampleOutputWeights);

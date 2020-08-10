@@ -4,8 +4,9 @@
 
 using System;
 using System.IO;
+using Microsoft.ML.Runtime;
 
-namespace Microsoft.ML.Runtime.Internal.Utilities
+namespace Microsoft.ML.Internal.Utilities
 {
     using Conditional = System.Diagnostics.ConditionalAttribute;
 
@@ -15,7 +16,8 @@ namespace Microsoft.ML.Runtime.Internal.Utilities
     /// file system. This can be useful if we have intermediate operations that require streams.
     /// The temporary file will be destroyed if the object is properly disposed.
     /// </summary>
-    public sealed class HybridMemoryStream : Stream
+    [BestFriend]
+    internal sealed class HybridMemoryStream : Stream
     {
         private MemoryStream _memStream;
         private Stream _overflowStream;
@@ -28,7 +30,8 @@ namespace Microsoft.ML.Runtime.Internal.Utilities
 
         private bool IsMemory => _memStream != null;
 
-        public override long Position {
+        public override long Position
+        {
             get => MyStream.Position;
             set => Seek(value, SeekOrigin.Begin);
         }
@@ -43,7 +46,7 @@ namespace Microsoft.ML.Runtime.Internal.Utilities
         /// bytes in the stream exceeds <paramref name="maxLen"/>,
         /// then we back off to disk.
         /// </summary>
-        /// <param name="maxLen">The maximum length we will accomodate in memory</param>
+        /// <param name="maxLen">The maximum length we will accommodate in memory</param>
         public HybridMemoryStream(int maxLen = _defaultMaxLen)
         {
             if (!(0 <= maxLen && maxLen <= Utils.ArrayMaxSize))
@@ -60,7 +63,7 @@ namespace Microsoft.ML.Runtime.Internal.Utilities
         /// somewhat easier.
         /// </summary>
         /// <param name="stream">A stream that can be opened</param>
-        /// <param name="maxLen">The maximum length we will accomodate in memory</param>
+        /// <param name="maxLen">The maximum length we will accommodate in memory</param>
         /// <returns>A readable copy of the data stream</returns>
         public static Stream CreateCache(Stream stream, int maxLen = _defaultMaxLen)
         {

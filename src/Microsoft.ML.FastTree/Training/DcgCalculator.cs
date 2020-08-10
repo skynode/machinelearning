@@ -5,11 +5,12 @@
 using System;
 using System.Linq;
 using System.Threading.Tasks;
-using Microsoft.ML.Runtime.Internal.Utilities;
+using Microsoft.ML.Internal.Utilities;
+using Microsoft.ML.Runtime;
 
-namespace Microsoft.ML.Runtime.FastTree.Internal
+namespace Microsoft.ML.Trainers.FastTree
 {
-    public sealed class DcgCalculator
+    internal sealed class DcgCalculator
     {
         // This should be exposed to outside classes as constants
         public static double[] LabelMap = new double[] { 0.0, 3.0, 7.0, 15.0, 31.0 };
@@ -251,7 +252,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
 
         /// <summary>
         /// Efficient computation of average NDCG@1 for the entire dataset
-        /// Note that it is virtual and MPI provides faster implemetations for MPI
+        /// Note that it is virtual and MPI provides faster implementations for MPI
         /// </summary>
         /// <param name="dataset">the dataset</param>
         /// <param name="labels"></param>
@@ -366,7 +367,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
 
             int chunkSize = 1 + dataset.NumQueries / BlockingThreadPool.NumThreads;   // Minimizes the number of repeat computations in sparse array to have each thread take as big a chunk as possible
             // REVIEW: This partitioning doesn't look optimal.
-            // Probably make sence to investigate better ways of splitting data?
+            // Probably make sense to investigate better ways of splitting data?
             var actions = new Action[(int)Math.Ceiling(1.0 * dataset.NumQueries / chunkSize)];
             var actionIndex = 0;
             for (int q = 0; q < dataset.NumQueries; q += chunkSize)
@@ -505,7 +506,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
 
             int chunkSize = 1 + dataset.NumQueries / BlockingThreadPool.NumThreads;   // Minimizes the number of repeat computations in sparse array to have each thread take as big a chunk as possible
             // REVIEW: This partitioning doesn't look optimal.
-            // Probably make sence to investigate better ways of splitting data?
+            // Probably make sense to investigate better ways of splitting data?
             var actions = new Action[(int)Math.Ceiling(1.0 * dataset.NumQueries / chunkSize)];
             var actionIndex = 0;
             for (int q = 0; q < dataset.NumQueries; q += chunkSize)

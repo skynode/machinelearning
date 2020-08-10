@@ -2,21 +2,20 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
-using Float = System.Single;
-
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Microsoft.ML;
+using Microsoft.ML.CommandLine;
+using Microsoft.ML.Internal.Utilities;
 using Microsoft.ML.Runtime;
-using Microsoft.ML.Runtime.CommandLine;
-using Microsoft.ML.Runtime.Internal.Utilities;
-using Microsoft.ML.Runtime.Sweeper.Algorithms;
-using Microsoft.ML.Runtime.FastTree.Internal;
+using Microsoft.ML.Sweeper.Algorithms;
+using Microsoft.ML.Trainers.FastTree;
 
-[assembly: LoadableClass(typeof(KdoSweeper), typeof(KdoSweeper.Arguments), typeof(SignatureSweeper),
+[assembly: LoadableClass(typeof(KdoSweeper), typeof(KdoSweeper.Options), typeof(SignatureSweeper),
     "KDO Sweeper", "KDOSweeper", "KDO")]
 
-namespace Microsoft.ML.Runtime.Sweeper.Algorithms
+namespace Microsoft.ML.Sweeper.Algorithms
 {
     /// <summary>
     /// Kernel Density Optimization (KDO) is a sequential model-based optimization method originally developed by George D. Montanez (me).
@@ -37,73 +36,73 @@ namespace Microsoft.ML.Runtime.Sweeper.Algorithms
 
     public sealed class KdoSweeper : ISweeper
     {
-        public sealed class Arguments
+        public sealed class Options
         {
-            [Argument(ArgumentType.Multiple | ArgumentType.Required, HelpText = "Swept parameters", ShortName = "p")]
-            public SubComponent<IValueGenerator, SignatureSweeperParameter>[] SweptParameters;
+            [Argument(ArgumentType.Multiple | ArgumentType.Required, HelpText = "Swept parameters", ShortName = "p", SignatureType = typeof(SignatureSweeperParameter))]
+            public IComponentFactory<IValueGenerator>[] SweptParameters;
 
             [Argument(ArgumentType.AtMostOnce, HelpText = "Seed for the random number generator for the first batch sweeper", ShortName = "seed")]
             public int RandomSeed;
 
-            [Argument(ArgumentType.LastOccurenceWins, HelpText = "If iteration point is outside parameter definitions, should it be projected?", ShortName = "project")]
+            [Argument(ArgumentType.LastOccurrenceWins, HelpText = "If iteration point is outside parameter definitions, should it be projected?", ShortName = "project")]
             public bool ProjectInBounds = true;
 
-            [Argument(ArgumentType.LastOccurenceWins, HelpText = "Number of points to use for random initialization", ShortName = "nip")]
+            [Argument(ArgumentType.LastOccurrenceWins, HelpText = "Number of points to use for random initialization", ShortName = "nip")]
             public int NumberInitialPopulation = 20;
 
-            [Argument(ArgumentType.LastOccurenceWins, HelpText = "Minimum mutation spread", ShortName = "mms")]
+            [Argument(ArgumentType.LastOccurrenceWins, HelpText = "Minimum mutation spread", ShortName = "mms")]
             public double MinimumMutationSpread = 0.001;
 
-            [Argument(ArgumentType.LastOccurenceWins, HelpText = "Maximum length of history to retain", ShortName = "hlen")]
+            [Argument(ArgumentType.LastOccurrenceWins, HelpText = "Maximum length of history to retain", ShortName = "hlen")]
             public int HistoryLength = 20;
 
-            [Argument(ArgumentType.LastOccurenceWins, HelpText = "If true, draws samples from independent Beta distributions, rather than multivariate Gaussian", ShortName = "beta")]
+            [Argument(ArgumentType.LastOccurrenceWins, HelpText = "If true, draws samples from independent Beta distributions, rather than multivariate Gaussian", ShortName = "beta")]
             public bool Beta = false;
 
-            [Argument(ArgumentType.LastOccurenceWins, HelpText = "If true, uses simpler mutation and concentration model")]
+            [Argument(ArgumentType.LastOccurrenceWins, HelpText = "If true, uses simpler mutation and concentration model")]
             public bool Simple = false;
 
-            [Argument(ArgumentType.LastOccurenceWins, HelpText = "Proportion of trials, between 0 and 1, that are uniform random draws", ShortName = "prand")]
+            [Argument(ArgumentType.LastOccurrenceWins, HelpText = "Proportion of trials, between 0 and 1, that are uniform random draws", ShortName = "prand")]
             public double ProportionRandom = 0.05;
 
-            [Argument(ArgumentType.LastOccurenceWins, HelpText = "Maximum power for rescaling (the larger the number, the stronger the exploitation of good points)", ShortName = "wrp")]
+            [Argument(ArgumentType.LastOccurrenceWins, HelpText = "Maximum power for rescaling (the larger the number, the stronger the exploitation of good points)", ShortName = "wrp")]
             public double WeightRescalingPower = 30;
 
             // REVIEW: this parameter should be removed as soon as we test the new method (as Prabhat Roy is currently doing 9/18/2017). It is here
             // to allow him to continue to run existing tests in progress using the previous behavior, but should be removed once we're sure this new change
             // doesn't degrade performance.
-            [Argument(ArgumentType.LastOccurenceWins, HelpText = "(Deprecated) Use legacy discrete parameter behavior.", ShortName = "legacy", Hide = true, Visibility = ArgumentAttribute.VisibilityType.CmdLineOnly)]
+            [Argument(ArgumentType.LastOccurrenceWins, HelpText = "(Deprecated) Use legacy discrete parameter behavior.", ShortName = "legacy", Hide = true, Visibility = ArgumentAttribute.VisibilityType.CmdLineOnly)]
             public bool LegacyDpBehavior = false;
         }
 
         private readonly ISweeper _randomSweeper;
         private readonly ISweeper _redundantSweeper;
-        private readonly Arguments _args;
+        private readonly Options _args;
         private readonly IHost _host;
 
         private readonly IValueGenerator[] _sweepParameters;
         private readonly SweeperProbabilityUtils _spu;
-        private readonly SortedSet<Float[]> _alreadySeenConfigs;
+        private readonly SortedSet<float[]> _alreadySeenConfigs;
         private readonly List<ParameterSet> _randomParamSets;
 
-        public KdoSweeper(IHostEnvironment env, Arguments args)
+        public KdoSweeper(IHostEnvironment env, Options options)
         {
             Contracts.CheckValue(env, nameof(env));
             _host = env.Register("Sweeper");
 
-            _host.CheckUserArg(args.NumberInitialPopulation > 1, nameof(args.NumberInitialPopulation), "Must be greater than 1");
-            _host.CheckUserArg(args.HistoryLength > 1, nameof(args.HistoryLength), "Must be greater than 1");
-            _host.CheckUserArg(args.MinimumMutationSpread >= 0, nameof(args.MinimumMutationSpread), "Must be nonnegative");
-            _host.CheckUserArg(0 <= args.ProportionRandom && args.ProportionRandom <= 1, nameof(args.ProportionRandom), "Must be in [0, 1]");
-            _host.CheckUserArg(args.WeightRescalingPower >= 1, nameof(args.WeightRescalingPower), "Must be greater or equal to 1");
+            _host.CheckUserArg(options.NumberInitialPopulation > 1, nameof(options.NumberInitialPopulation), "Must be greater than 1");
+            _host.CheckUserArg(options.HistoryLength > 1, nameof(options.HistoryLength), "Must be greater than 1");
+            _host.CheckUserArg(options.MinimumMutationSpread >= 0, nameof(options.MinimumMutationSpread), "Must be nonnegative");
+            _host.CheckUserArg(0 <= options.ProportionRandom && options.ProportionRandom <= 1, nameof(options.ProportionRandom), "Must be in [0, 1]");
+            _host.CheckUserArg(options.WeightRescalingPower >= 1, nameof(options.WeightRescalingPower), "Must be greater or equal to 1");
 
-            _args = args;
-            _host.CheckUserArg(Utils.Size(args.SweptParameters) > 0, nameof(args.SweptParameters), "KDO sweeper needs at least one parameter to sweep over");
-            _sweepParameters = args.SweptParameters.Select(p => p.CreateInstance(_host)).ToArray();
-            _randomSweeper = new UniformRandomSweeper(env, new SweeperBase.ArgumentsBase(), _sweepParameters);
-            _redundantSweeper = new UniformRandomSweeper(env, new SweeperBase.ArgumentsBase { Retries = 0 }, _sweepParameters);
+            _args = options;
+            _host.CheckUserArg(Utils.Size(options.SweptParameters) > 0, nameof(options.SweptParameters), "KDO sweeper needs at least one parameter to sweep over");
+            _sweepParameters = options.SweptParameters.Select(p => p.CreateComponent(_host)).ToArray();
+            _randomSweeper = new UniformRandomSweeper(env, new SweeperBase.OptionsBase(), _sweepParameters);
+            _redundantSweeper = new UniformRandomSweeper(env, new SweeperBase.OptionsBase { Retries = 0 }, _sweepParameters);
             _spu = new SweeperProbabilityUtils(_host);
-            _alreadySeenConfigs = new SortedSet<Float[]>(new FloatArrayComparer());
+            _alreadySeenConfigs = new SortedSet<float[]>(new FloatArrayComparer());
             _randomParamSets = new List<ParameterSet>();
         }
 
@@ -144,7 +143,7 @@ namespace Microsoft.ML.Runtime.Sweeper.Algorithms
                 // I'm not sure if this is too much detail, but it might be.
                 string errorMessage = $"Error: Sweep run results are missing metric values. \n\n" +
                                       $"NOTE: Default metric of 'AUC' only viable for binary classification problems. \n" +
-                                      $"Please include an evaluator (ev) subcomponent with an appropriate metric specified for your task type.\n\n" +
+                                      $"Please include an evaluator (ev) component with an appropriate metric specified for your task type.\n\n" +
                                        "Example RSP using alternate metric (i.e., AccuracyMicro):\nrunner=Local{\n\tev=Tlc{m=AccuracyMicro}\n\tpattern={...etc...}\n}";
                 throw _host.Except(new Exception(errorMessage), errorMessage);
             }
@@ -202,7 +201,7 @@ namespace Microsoft.ML.Runtime.Sweeper.Algorithms
         /// <returns>A mutated version of parent (i.e., point sampled near parent).</returns>
         private ParameterSet SampleChild(ParameterSet parent, double fitness, int n, IRunResult[] previousRuns, double rMean, double rVar, bool isMetricMaximizing)
         {
-            Float[] child = SweeperProbabilityUtils.ParameterSetAsFloatArray(_host, _sweepParameters, parent, false);
+            float[] child = SweeperProbabilityUtils.ParameterSetAsFloatArray(_host, _sweepParameters, parent, false);
             List<int> numericParamIndices = new List<int>();
             List<double> numericParamValues = new List<double>();
             int loopCount = 0;
@@ -253,19 +252,19 @@ namespace Microsoft.ML.Runtime.Sweeper.Algorithms
                         double[][] bandwidthMatrix = BuildBandwidthMatrix(n, stddevs);
                         double[] sampledPoint = SampleDiagonalCovMultivariateGaussian(1, mu, bandwidthMatrix)[0];
                         for (int j = 0; j < sampledPoint.Length; j++)
-                            child[numericParamIndices[j]] = (Float)Corral(sampledPoint[j]);
+                            child[numericParamIndices[j]] = (float)Corral(sampledPoint[j]);
                     }
                     else
                     {
                         // If Beta flag set, sample from independent Beta distributions instead.
-                        SysRandom rng = new SysRandom();
+                        Random rng = new Random();
                         double alpha = 1 + 15 * fitness;
                         foreach (int index in numericParamIndices)
                         {
                             const double epsCutoff = 1e-10;
                             double eps = Math.Min(Math.Max(child[index], epsCutoff), 1 - epsCutoff);
                             double beta = alpha / eps - alpha;
-                            child[index] = (Float)Stats.SampleFromBeta(rng, alpha, beta);
+                            child[index] = (float)Stats.SampleFromBeta(rng, alpha, beta);
                         }
                     }
                 }
@@ -374,7 +373,7 @@ namespace Microsoft.ML.Runtime.Sweeper.Algorithms
             for (int i = 0; i < weights.Length; i++)
                 weights[i] /= (counts[i] > 0 ? counts[i] : 1);
 
-            // If any learner has not been seen, default it's average to
+            // If any learner has not been seen, default its average to
             // best value to encourage exploration of untried algorithms.
             double bestVal = isMaximizing ?
                 previousRuns.Cast<RunResult>().Where(r => r.HasMetricValue).Max(r => r.MetricValue) :
@@ -496,9 +495,9 @@ namespace Microsoft.ML.Runtime.Sweeper.Algorithms
             return result;
         }
 
-        private sealed class FloatArrayComparer : IComparer<Float[]>
+        private sealed class FloatArrayComparer : IComparer<float[]>
         {
-            public int Compare(Float[] x, Float[] y)
+            public int Compare(float[] x, float[] y)
             {
                 if (x.Length != y.Length)
                     return x.Length > y.Length ? 1 : -1;

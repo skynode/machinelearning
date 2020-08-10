@@ -2,22 +2,21 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
-using Float = System.Single;
-
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading;
-using Microsoft.ML.Runtime.Internal.Utilities;
+using System.Threading.Tasks;
+using Microsoft.ML.Internal.Utilities;
+using Microsoft.ML.Runtime;
 
-namespace Microsoft.ML.Runtime.Data
+namespace Microsoft.ML.Data
 {
-    public sealed partial class TextLoader : IDataLoader
+    public sealed partial class TextLoader
     {
-        private sealed class Cursor : RootCursorBase, IRowCursor
+        private sealed class Cursor : RootCursorBase
         {
             // Lines are divided into batches and processed a batch at a time. This enables
             // parallel parsing.
@@ -49,8 +48,7 @@ namespace Microsoft.ML.Runtime.Data
             {
                 // Note that files is allowed to be empty.
                 Contracts.AssertValue(parent);
-                Contracts.AssertValue(parent._files);
-                Contracts.Assert(active == null || active.Length == parent._bindings.Infos.Length);
+                Contracts.Assert(active == null || active.Length == parent._bindings.OutputSchema.Count);
 
                 var bindings = parent._bindings;
 
@@ -74,7 +72,7 @@ namespace Microsoft.ML.Runtime.Data
                 Contracts.Assert(srcNeeded >= 0);
 
                 // Determine the number of threads to use.
-                cthd = DataViewUtils.GetThreadCount(parent._host, n, !parent._useThreads);
+                cthd = DataViewUtils.GetThreadCount(n, !parent._useThreads);
 
                 long cblkMax = parent._maxRows / BatchSize;
                 if (cthd > cblkMax)
@@ -88,8 +86,7 @@ namespace Microsoft.ML.Runtime.Data
             private Cursor(TextLoader parent, ParseStats stats, bool[] active, LineReader reader, int srcNeeded, int cthd)
                 : base(parent._host)
             {
-                Ch.AssertValue(parent._files);
-                Ch.Assert(active == null || active.Length == parent._bindings.Infos.Length);
+                Ch.Assert(active == null || active.Length == parent._bindings.OutputSchema.Count);
                 Ch.AssertValue(reader);
                 Ch.AssertValue(stats);
                 Ch.Assert(srcNeeded >= 0);
@@ -138,46 +135,41 @@ namespace Microsoft.ML.Runtime.Data
                 }
             }
 
-            public static IRowCursor Create(TextLoader parent, bool[] active)
+            public static DataViewRowCursor Create(TextLoader parent, IMultiStreamSource files, bool[] active)
             {
                 // Note that files is allowed to be empty.
                 Contracts.AssertValue(parent);
-                Contracts.AssertValue(parent._files);
-                Contracts.Assert(active == null || active.Length == parent._bindings.Infos.Length);
+                Contracts.AssertValue(files);
+                Contracts.Assert(active == null || active.Length == parent._bindings.OutputSchema.Count);
 
                 int srcNeeded;
                 int cthd;
                 SetupCursor(parent, active, 0, out srcNeeded, out cthd);
                 Contracts.Assert(cthd > 0);
 
-                var reader = new LineReader(parent._files, BatchSize, 100, parent.HasHeader, parent._maxRows, 1);
+                var reader = new LineReader(files, BatchSize, 100, parent.HasHeader, parent.ReadMultilines, parent._separators, parent._escapeChar, parent._maxRows, 1);
                 var stats = new ParseStats(parent._host, 1);
                 return new Cursor(parent, stats, active, reader, srcNeeded, cthd);
             }
 
-            public static IRowCursor[] CreateSet(out IRowCursorConsolidator consolidator,
-                TextLoader parent, bool[] active, int n)
+            public static DataViewRowCursor[] CreateSet(TextLoader parent, IMultiStreamSource files, bool[] active, int n)
             {
                 // Note that files is allowed to be empty.
                 Contracts.AssertValue(parent);
-                Contracts.AssertValue(parent._files);
-                Contracts.Assert(active == null || active.Length == parent._bindings.Infos.Length);
+                Contracts.AssertValue(files);
+                Contracts.Assert(active == null || active.Length == parent._bindings.OutputSchema.Count);
 
                 int srcNeeded;
                 int cthd;
                 SetupCursor(parent, active, n, out srcNeeded, out cthd);
                 Contracts.Assert(cthd > 0);
 
-                var reader = new LineReader(parent._files, BatchSize, 100, parent.HasHeader, parent._maxRows, cthd);
+                var reader = new LineReader(files, BatchSize, 100, parent.HasHeader, parent.ReadMultilines, parent._separators, parent._escapeChar, parent._maxRows, cthd);
                 var stats = new ParseStats(parent._host, cthd);
                 if (cthd <= 1)
-                {
-                    consolidator = null;
-                    return new IRowCursor[1] { new Cursor(parent, stats, active, reader, srcNeeded, 1) };
-                }
+                    return new DataViewRowCursor[1] { new Cursor(parent, stats, active, reader, srcNeeded, 1) };
 
-                consolidator = new Consolidator(cthd);
-                var cursors = new IRowCursor[cthd];
+                var cursors = new DataViewRowCursor[cthd];
                 try
                 {
                     for (int i = 0; i < cursors.Length; i++)
@@ -204,17 +196,17 @@ namespace Microsoft.ML.Runtime.Data
                 }
             }
 
-            public override ValueGetter<UInt128> GetIdGetter()
+            public override ValueGetter<DataViewRowId> GetIdGetter()
             {
                 return
-                    (ref UInt128 val) =>
+                    (ref DataViewRowId val) =>
                     {
-                        Ch.Check(IsGood, "Cannot call ID getter in current state");
-                        val = new UInt128((ulong)_total, 0);
+                        Ch.Check(IsGood, RowCursorUtils.FetchValueStateError);
+                        val = new DataViewRowId((ulong)_total, 0);
                     };
             }
 
-            public static void GetSomeLines(IMultiStreamSource source, int count, ref List<DvText> lines)
+            public static void GetSomeLines(IMultiStreamSource source, int count, bool readMultilines, char[] separators, char escapeChar, ref List<ReadOnlyMemory<char>> lines)
             {
                 Contracts.AssertValue(source);
                 Contracts.Assert(count > 0);
@@ -224,7 +216,7 @@ namespace Microsoft.ML.Runtime.Data
                     count = 2;
 
                 LineBatch batch;
-                var reader = new LineReader(source, count, 1, false, count, 1);
+                var reader = new LineReader(source, count, 1, false, readMultilines, separators, escapeChar, count, 1);
                 try
                 {
                     batch = reader.GetBatch();
@@ -238,7 +230,7 @@ namespace Microsoft.ML.Runtime.Data
                 }
 
                 for (int i = 0; i < batch.Infos.Length; i++)
-                    Utils.Add(ref lines, new DvText(batch.Infos[i].Text));
+                    Utils.Add(ref lines, batch.Infos[i].Text.AsMemory());
             }
 
             /// <summary>
@@ -278,24 +270,24 @@ namespace Microsoft.ML.Runtime.Data
                 return sb.ToString();
             }
 
-            public ISchema Schema { get { return _bindings; } }
+            public override DataViewSchema Schema => _bindings.OutputSchema;
 
-            public override void Dispose()
+            protected override void Dispose(bool disposing)
             {
                 if (_disposed)
                     return;
-
+                if (disposing)
+                {
+                    _ator.Dispose();
+                    _reader.Release();
+                    _stats.Release();
+                }
                 _disposed = true;
-                _ator.Dispose();
-                _reader.Release();
-                _stats.Release();
-                base.Dispose();
+                base.Dispose(disposing);
             }
 
             protected override bool MoveNextCore()
             {
-                Contracts.Assert(State != CursorState.Done);
-
                 if (_ator.MoveNext())
                 {
                     _rows.Index = _ator.Current;
@@ -306,18 +298,32 @@ namespace Microsoft.ML.Runtime.Data
                 return false;
             }
 
-            public bool IsColumnActive(int col)
+            /// <summary>
+            /// Returns whether the given column is active in this row.
+            /// </summary>
+            public override bool IsColumnActive(DataViewSchema.Column column)
             {
-                Ch.Check(0 <= col && col < _bindings.Infos.Length);
-                return _active == null || _active[col];
+                Ch.Check(column.Index < _bindings.Infos.Length);
+                return _active == null || _active[column.Index];
             }
 
-            public ValueGetter<TValue> GetGetter<TValue>(int col)
+            /// <summary>
+            /// Returns a value getter delegate to fetch the value of column with the given columnIndex, from the row.
+            /// This throws if the column is not active in this row, or if the type
+            /// <typeparamref name="TValue"/> differs from this column's type.
+            /// </summary>
+            /// <typeparam name="TValue"> is the column's content type.</typeparam>
+            /// <param name="column"> is the output column whose getter should be returned.</param>
+            public override ValueGetter<TValue> GetGetter<TValue>(DataViewSchema.Column column)
             {
-                Ch.Check(IsColumnActive(col));
-                var fn = _getters[col] as ValueGetter<TValue>;
+                Ch.CheckParam(column.Index < _getters.Length, nameof(column), "requested column not valid.");
+                Ch.Check(IsColumnActive(column));
+
+                var originFn = _getters[column.Index];
+                var fn = originFn as ValueGetter<TValue>;
                 if (fn == null)
-                    throw Ch.Except("Invalid TValue in GetGetter: '{0}'", typeof(TValue));
+                    throw Ch.Except($"Invalid TValue in GetGetter: '{typeof(TValue)}', " +
+                        $"expected type: '{originFn.GetType().GetGenericArguments().First()}'.");
                 return fn;
             }
 
@@ -349,7 +355,7 @@ namespace Microsoft.ML.Runtime.Data
             // abort situations.
             private const int TimeOut = 100;
 
-            private struct LineBatch
+            private readonly struct LineBatch
             {
                 public readonly string Path;
                 // Total lines, up to the first line of this batch.
@@ -380,7 +386,7 @@ namespace Microsoft.ML.Runtime.Data
                 }
             }
 
-            private struct LineInfo
+            private readonly struct LineInfo
             {
                 public readonly long Line;
                 public readonly string Text;
@@ -399,16 +405,19 @@ namespace Microsoft.ML.Runtime.Data
             {
                 private readonly long _limit;
                 private readonly bool _hasHeader;
+                private readonly bool _readMultilines;
+                private readonly char[] _separators;
+                private readonly char _escapeChar;
                 private readonly int _batchSize;
                 private readonly IMultiStreamSource _files;
 
                 // The line reader can be referenced by multiple workers. This is the reference count.
                 private int _cref;
-                private BlockingCollection<LineBatch> _queue;
-                private Thread _thdRead;
+                private BlockingQueue<LineBatch> _queue;
+                private Task _thdRead;
                 private volatile bool _abort;
 
-                public LineReader(IMultiStreamSource files, int batchSize, int bufSize, bool hasHeader, long limit, int cref)
+                public LineReader(IMultiStreamSource files, int batchSize, int bufSize, bool hasHeader, bool readMultilines, char[] separators, char escapeChar, long limit, int cref)
                 {
                     // Note that files is allowed to be empty.
                     Contracts.AssertValue(files);
@@ -421,12 +430,14 @@ namespace Microsoft.ML.Runtime.Data
                     _limit = limit;
                     _hasHeader = hasHeader;
                     _batchSize = batchSize;
+                    _readMultilines = readMultilines;
+                    _separators = separators;
+                    _escapeChar = escapeChar;
                     _files = files;
                     _cref = cref;
 
-                    _queue = new BlockingCollection<LineBatch>(bufSize);
-                    _thdRead = Utils.CreateBackgroundThread(ThreadProc);
-                    _thdRead.Start();
+                    _queue = new BlockingQueue<LineBatch>(bufSize);
+                    _thdRead = Utils.RunOnBackgroundThreadAsync(ThreadProc);
                 }
 
                 public void Release()
@@ -440,7 +451,7 @@ namespace Microsoft.ML.Runtime.Data
                     if (_thdRead != null)
                     {
                         _abort = true;
-                        _thdRead.Join();
+                        _thdRead.Wait();
                         _thdRead = null;
                     }
 
@@ -453,27 +464,222 @@ namespace Microsoft.ML.Runtime.Data
 
                 public LineBatch GetBatch()
                 {
-                    Exception inner = null;
-                    try
+                    if (!_queue.TryTake(out LineBatch batch, millisecondsTimeout: -1))
+                        return default;
+
+                    if (batch.Exception == null)
+                        return batch;
+
+                    Contracts.AssertValue(batch.Exception);
+                    throw Contracts.ExceptDecode(batch.Exception, "Stream reading encountered exception");
+                }
+
+                private class MultiLineReader
+                {
+                    private readonly char _sep0;
+                    private readonly char[] _separators;
+                    private readonly bool _sepsContainsSpace;
+                    private readonly char _escapeChar;
+                    private readonly bool _escapeCharIsDoubleQuote;
+                    private readonly StringBuilder _sb;
+                    private readonly TextReader _rdr;
+
+                    public MultiLineReader(TextReader rdr, char[] separators, char escapeChar)
                     {
-                        var batch = _queue.Take();
-                        if (batch.Exception == null)
-                            return batch;
-                        inner = batch.Exception;
+                        Contracts.AssertNonEmpty(separators);
+                        _sep0 = separators[0];
+                        _separators = separators;
+                        _sepsContainsSpace = IsSep(' ');
+                        _escapeChar = escapeChar;
+                        _escapeCharIsDoubleQuote = (escapeChar == '"');
+                        _sb = new StringBuilder();
+                        _rdr = rdr;
                     }
-                    catch (InvalidOperationException)
+
+                    // When reading lines that contain quoted fields, the quoted fields can contain
+                    // '\n' so we we'll need to read multiple lines (multilines) to get all the fields
+                    // of a given row.
+                    public string ReadMultiLine(long lineNum, bool ignoreHashLine)
                     {
-                        // This code detects when there is no more content by catching the exception thrown by _queue.Take() at the end.
-                        // If _queue.IsAddingCompleted is true, we know that this exception was the result of that specifically.
-                        // This should probably be re-engineered to not rely on exception blocks.
-                        // REVIEW: Come up with a less strange scheme for the interthread communication here, that does not
-                        // rely on exceptions and timeouts throughout the pipeline.
-                        if (_queue.IsAddingCompleted)
-                            return default(LineBatch);
-                        throw;
+                        string line;
+                        line = _rdr.ReadLine();
+
+                        // if it was an empty line or if we've reached the end of file (i.e. line = null)
+                        if (string.IsNullOrEmpty(line))
+                            return line;
+
+                        // In ML.NET we filter out lines beginning with // and # at the beginning of the file
+                        // Or lines beginning with // elsewhere in the file.
+                        // Thus, we don't care to check if there's a quoted multiline when the line begins with
+                        // these chars.
+                        if (line[0] == '/' && line[1] == '/')
+                            return line;
+                        if (ignoreHashLine && line[0] == '#')
+                            return line;
+
+                        // Get more lines until the last field of the line doesn't contain its newline
+                        // inside a quoted field
+                        bool lastFieldIncludesNewLine = LastFieldIncludesNewLine(line, false);
+                        if (!lastFieldIncludesNewLine)
+                            return line;
+
+                        _sb.Clear();
+                        _sb.Append(line);
+                        while (lastFieldIncludesNewLine)
+                        {
+                            line = _rdr.ReadLine();
+
+                            if (line == null)
+                                throw new EndOfStreamException($"A quoted field opened on line {lineNum} was never closed, and we've read to the last line in the file without finding the closing quote");
+
+                            _sb.Append("\n");
+                            _sb.Append(line);
+                            lastFieldIncludesNewLine = LastFieldIncludesNewLine(line, true);
+                        }
+
+                        return _sb.ToString();
                     }
-                    Contracts.AssertValue(inner);
-                    throw Contracts.ExceptDecode(inner, "Stream reading encountered exception");
+
+                    // The startsInsideQuoted parameter indicates if the last field of the previous line
+                    // ended in a quoted field which included the newline character,
+                    // if it is true, then the beginning of this line is considered to be part
+                    // of the last field of the previous line.
+                    public bool LastFieldIncludesNewLine(string line, bool startsInsideQuoted = false)
+                    {
+                        if (line.Length == 0)
+                            return startsInsideQuoted;
+
+                        int ichCur = 0;
+                        int ichLim = line.Length;
+                        bool quotingError = false;
+
+                        bool ret = FieldIncludesNewLine(ref line, ref ichCur, ichLim, ref quotingError, startsInsideQuoted);
+                        while (ichCur < ichLim)
+                        {
+                            ret = FieldIncludesNewLine(ref line, ref ichCur, ichLim, ref quotingError, false);
+                            if(quotingError)
+                                return false;
+
+                            // Skip empty fields
+                            while (ichCur < ichLim && IsSep(line[ichCur]))
+                                ichCur++;
+                        }
+
+                        return ret;
+                    }
+
+                    private bool FieldIncludesNewLine(ref string line, ref int ichCur, int ichLim,
+                        ref bool quotingError, bool startsInsideQuoted)
+                    {
+                        if (!startsInsideQuoted && !_sepsContainsSpace)
+                        {
+                            // Ignore leading spaces
+                            while (ichCur < ichLim && line[ichCur] == ' ')
+                                ichCur++;
+                        }
+
+                        if (ichCur >= ichLim) // if there were only leading spaces on the line
+                            return startsInsideQuoted;
+
+                        if(startsInsideQuoted || line[ichCur] == '"')
+                        {
+                            // Quoted Field Case
+
+                            if (!startsInsideQuoted)
+                                ichCur++;
+
+                            if (_escapeCharIsDoubleQuote)
+                            {
+                                for (; ; ichCur++)
+                                {
+                                    if (ichCur >= ichLim)
+                                        // We've reached the end of the line without finding the closing quote,
+                                        // so next line will start on this quoted field
+                                        return true;
+
+                                    if (line[ichCur] == '"')
+                                    {
+                                        if (++ichCur >= ichLim)
+                                            // Last character in line was the closing quote of the field
+                                            return false;
+
+                                        if (line[ichCur] == '"')
+                                            // 2 Double quotes means escaped quote
+                                            continue;
+
+                                        // If it wasn't an escaped quote, then this is supposed to be
+                                        // the closing quote of the field
+                                        break;
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                for (; ; ichCur++)
+                                {
+                                    if (ichCur >= ichLim)
+                                        // We've reached the end of the line without finding the closing quote,
+                                        // so next line will start on this quoted field
+                                        return true;
+
+                                    if (line[ichCur] == _escapeChar)
+                                    {
+                                        if (++ichCur >= ichLim)
+                                            // Last character in line was escapeChar
+                                            return true;
+
+                                        // Whatever char comes after an escapeChar is ignored
+                                        continue;
+                                    }
+                                    else if (line[ichCur] == '"')
+                                    {
+                                        // Since this wasn't an escaped quote, then this is supposed to be
+                                        // the closing quote of the field
+                                        break;
+                                    }
+                                }
+                            }
+
+                            // After finding the closing quote of the field...
+                            // There should only be empty spaces until the next separator
+                            if (!_sepsContainsSpace)
+                            {
+                                // Ignore leading spaces
+                                while (ichCur < ichLim && line[ichCur] == ' ')
+                                    ichCur++;
+                            }
+
+                            // If there's anything else than spaces or the next separator,
+                            // this will actually be a QuotingError on the parser, so we decide that this
+                            // line contains a quoting error, and so it's not going to be considered a valid field
+                            // and the rest of the line should be ignored.
+                            if (ichCur >= ichLim || IsSep(line[ichCur]))
+                                return false;
+
+                            quotingError = true;
+                            return false;
+                        }
+
+                        // Unquoted field case.
+                        // An unquoted field shouldn't contain new lines
+                        while(ichCur < ichLim && !IsSep(line[ichCur]))
+                        {
+                            ichCur++;
+                        }
+                        return false;
+                    }
+
+                    private bool IsSep(char ch)
+                    {
+                        if (ch == _sep0)
+                            return true;
+                        for (int i = 1; i < _separators.Length; i++)
+                        {
+                            if (ch == _separators[i])
+                                return true;
+                        }
+                        return false;
+                    }
                 }
 
                 private void ThreadProc()
@@ -492,14 +698,19 @@ namespace Microsoft.ML.Runtime.Data
                             string path = _files.GetPathOrNull(ifile);
                             using (var rdr = _files.OpenTextReader(ifile))
                             {
+                                var multilineReader = new MultiLineReader(rdr, _separators, _escapeChar);
                                 string text;
                                 long line = 0;
                                 for (; ; )
                                 {
                                     // REVIEW: Avoid allocating a string for every line. This would probably require
-                                    // introducing a CharSpan type (similar to DvText but based on char[] or StringBuilder)
+                                    // introducing a CharSpan type (similar to ReadOnlyMemory but based on char[] or StringBuilder)
                                     // and implementing all the necessary conversion functionality on it. See task 3871.
-                                    text = rdr.ReadLine();
+                                    if (_readMultilines)
+                                        text = multilineReader.ReadMultiLine(line, true);
+                                    else
+                                        text = rdr.ReadLine();
+
                                     if (text == null)
                                         goto LNext;
                                     line++;
@@ -526,7 +737,11 @@ namespace Microsoft.ML.Runtime.Data
                                     if (_abort)
                                         return;
 
-                                    text = rdr.ReadLine();
+                                    if (_readMultilines)
+                                        text = multilineReader.ReadMultiLine(line, false);
+                                    else
+                                        text = rdr.ReadLine();
+
                                     if (text == null)
                                     {
                                         // We're done with this file. Queue the last partial batch.
@@ -611,7 +826,7 @@ namespace Microsoft.ML.Runtime.Data
                     foreach (var batch in state.GetBatches())
                     {
                         // If the collation of rows happened correctly, this should have a precise value.
-                        Contracts.Assert(batch.Total == _total + 1);
+                        Contracts.Assert(batch.Total == _total + 1, $"batch.Total:{batch.Total} while _total + 1:{_total + 1}.");
                         _total = batch.Total - 1;
                         for (int irow = batch.IrowMin; irow < batch.IrowLim; irow++)
                         {
@@ -661,9 +876,9 @@ namespace Microsoft.ML.Runtime.Data
                 private readonly OrderedWaiter _waiterPublish;
 
                 // A small capacity blocking collection that the main cursor thread consumes.
-                private readonly BlockingCollection<RowBatch> _queue;
+                private readonly BlockingQueue<RowBatch> _queue;
 
-                private readonly Thread[] _threads;
+                private readonly Task[] _threads;
 
                 // Number of threads still running.
                 private int _threadsRunning;
@@ -696,15 +911,14 @@ namespace Microsoft.ML.Runtime.Data
 
                     // The size limit here ensures that worker threads are never writing to
                     // a range that is being served up by the cursor.
-                    _queue = new BlockingCollection<RowBatch>(2);
+                    _queue = new BlockingQueue<RowBatch>(2);
 
-                    _threads = new Thread[cthd];
+                    _threads = new Task[cthd];
                     _threadsRunning = cthd;
 
                     for (int tid = 0; tid < _threads.Length; tid++)
                     {
-                        var thd = _threads[tid] = Utils.CreateBackgroundThread(ThreadProc);
-                        thd.Start(tid);
+                        _threads[tid] = Utils.RunOnBackgroundThreadAsync(ThreadProc, tid);
                     }
                 }
 
@@ -712,8 +926,7 @@ namespace Microsoft.ML.Runtime.Data
                 {
                     // Signal all the threads to shut down and wait for them.
                     Quit();
-                    for (int i = 0; i < _threads.Length; i++)
-                        _threads[i].Join();
+                    Task.WaitAll(_threads);
                 }
 
                 private void Quit()
@@ -821,39 +1034,6 @@ namespace Microsoft.ML.Runtime.Data
                         if (iblk >= _blockCount)
                             iblk -= _blockCount;
                         Contracts.Assert(0 <= iblk && iblk < _blockCount);
-                    }
-                }
-            }
-
-            /// <summary>
-            /// The consolidator object. This simply records the number of threads and checks
-            /// that they match at the end.
-            /// </summary>
-            private sealed class Consolidator : IRowCursorConsolidator
-            {
-                private int _cthd;
-
-                public Consolidator(int cthd)
-                {
-                    Contracts.Assert(cthd > 1);
-                    _cthd = cthd;
-                }
-
-                public IRowCursor CreateCursor(IChannelProvider provider, IRowCursor[] inputs)
-                {
-                    Contracts.AssertValue(provider);
-                    int cthd = Interlocked.Exchange(ref _cthd, 0);
-                    provider.Check(cthd > 1, "Consolidator can only be used once");
-                    provider.Check(Utils.Size(inputs) == cthd, "Unexpected number of cursors");
-
-                    // ConsolidateGeneric does all the standard validity checks: all cursors non-null,
-                    // all have the same schema, all have the same active columns, and all active
-                    // column types are cachable.
-                    using (var ch = provider.Start("Consolidator"))
-                    {
-                        var result = DataViewUtils.ConsolidateGeneric(provider, inputs, BatchSize);
-                        ch.Done();
-                        return result;
                     }
                 }
             }

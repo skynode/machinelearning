@@ -4,17 +4,32 @@
 
 #undef COMPARE_BCL
 
-using Float = System.Single;
-
 using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
+using Microsoft.ML.Runtime;
 
-namespace Microsoft.ML.Runtime.Internal.Utilities
+namespace Microsoft.ML.Internal.Utilities
 {
-    public class DoubleParser
+    [BestFriend]
+    internal static class DoubleParser
     {
+        [BestFriend]
+        [Flags]
+        internal enum OptionFlags : uint
+        {
+            Default = 0x00,
+
+            // If this flag is set, then a "," will be used as Decimal Marker
+            // (i.e., the punctuation mark that separates the integer part of
+            // a number and its decimal part). If this isn't set, then
+            // default behavior is to use "." as decimal marker.
+            UseCommaAsDecimalMarker = 0x01,
+
+            // If this flag is set, then empty spans (or those with only white-space)
+            // will be parsed as NaN. If it isn't set, then default behavior
+            // is to return them as 0.
+            EmptyAsNaN = 0x02,
+        }
+
         private const ulong TopBit = 0x8000000000000000UL;
         private const ulong TopTwoBits = 0xC000000000000000UL;
         private const ulong TopThreeBits = 0xE000000000000000UL;
@@ -70,25 +85,48 @@ namespace Microsoft.ML.Runtime.Internal.Utilities
             Error = 3
         }
 
-        public static Result Parse(out Single value, string s, int ichMin, int ichLim)
+        /// <summary>
+        /// This produces zero for an empty string, or NaN depending on the <see cref="DoubleParser.OptionFlags.EmptyAsNaN"/> used.
+        /// </summary>
+        public static bool TryParse(ReadOnlySpan<char> span, out Single value, OptionFlags flags = OptionFlags.Default)
         {
-            Contracts.Assert(0 <= ichMin && ichMin <= ichLim && ichLim <= Utils.Size(s));
+            var res = Parse(span, out value, flags);
+            Contracts.Assert(res != Result.Empty || ((flags & OptionFlags.EmptyAsNaN) == 0 && value == 0) || Single.IsNaN(value));
+            return res <= Result.Empty;
+        }
 
-            for (; ; ichMin++)
+        /// <summary>
+        /// This produces zero for an empty string, or NaN depending on the <see cref="DoubleParser.OptionFlags.EmptyAsNaN"/> used.
+        /// </summary>
+        public static bool TryParse(ReadOnlySpan<char> span, out Double value, OptionFlags flags = OptionFlags.Default)
+        {
+            var res = Parse(span, out value, flags);
+            Contracts.Assert(res != Result.Empty || ((flags & OptionFlags.EmptyAsNaN) == 0 && value == 0) || Double.IsNaN(value));
+            return res <= Result.Empty;
+        }
+
+        public static Result Parse(ReadOnlySpan<char> span, out Single value, OptionFlags flags = OptionFlags.Default)
+        {
+            int ich = 0;
+            for (; ; ich++)
             {
-                if (ichMin >= ichLim)
+                if (ich >= span.Length)
                 {
-                    value = 0;
+                    if ((flags & OptionFlags.EmptyAsNaN) == 0)
+                        value = 0;
+                    else
+                        value = Single.NaN;
+
                     return Result.Empty;
                 }
-                if (!char.IsWhiteSpace(s[ichMin]))
+                if (!char.IsWhiteSpace(span[ich]))
                     break;
             }
 
             // Handle the common case of a single digit or ?
-            if (ichLim - ichMin == 1)
+            if (span.Length - ich == 1)
             {
-                char ch = s[ichMin];
+                char ch = span[ich];
                 if (ch >= '0' && ch <= '9')
                 {
                     value = ch - '0';
@@ -102,16 +140,16 @@ namespace Microsoft.ML.Runtime.Internal.Utilities
             }
 
             int ichEnd;
-            if (!DoubleParser.TryParse(out value, s, ichMin, ichLim, out ichEnd))
+            if (!DoubleParser.TryParse(span.Slice(ich, span.Length - ich), out value, out ichEnd, flags))
             {
                 value = default(Single);
                 return Result.Error;
             }
 
             // Make sure everything was consumed.
-            while (ichEnd < ichLim)
+            while (ichEnd < span.Length)
             {
-                if (!char.IsWhiteSpace(s[ichEnd]))
+                if (!char.IsWhiteSpace(span[ichEnd]))
                     return Result.Extra;
                 ichEnd++;
             }
@@ -119,25 +157,28 @@ namespace Microsoft.ML.Runtime.Internal.Utilities
             return Result.Good;
         }
 
-        public static Result Parse(out Double value, string s, int ichMin, int ichLim)
+        public static Result Parse(ReadOnlySpan<char> span, out Double value, OptionFlags flags = OptionFlags.Default)
         {
-            Contracts.Assert(0 <= ichMin && ichMin <= ichLim && ichLim <= Utils.Size(s));
-
-            for (; ; ichMin++)
+            int ich = 0;
+            for (; ; ich++)
             {
-                if (ichMin >= ichLim)
+                if (ich >= span.Length)
                 {
-                    value = 0;
+                    if ((flags & OptionFlags.EmptyAsNaN) == 0)
+                        value = 0;
+                    else
+                        value = Double.NaN;
+
                     return Result.Empty;
                 }
-                if (!char.IsWhiteSpace(s[ichMin]))
+                if (!char.IsWhiteSpace(span[ich]))
                     break;
             }
 
             // Handle the common case of a single digit or ?
-            if (ichLim - ichMin == 1)
+            if (span.Length - ich == 1)
             {
-                char ch = s[ichMin];
+                char ch = span[ich];
                 if (ch >= '0' && ch <= '9')
                 {
                     value = ch - '0';
@@ -151,16 +192,16 @@ namespace Microsoft.ML.Runtime.Internal.Utilities
             }
 
             int ichEnd;
-            if (!DoubleParser.TryParse(out value, s, ichMin, ichLim, out ichEnd))
+            if (!DoubleParser.TryParse(span.Slice(ich, span.Length - ich), out value, out ichEnd, flags))
             {
                 value = default(Double);
                 return Result.Error;
             }
 
             // Make sure everything was consumed.
-            while (ichEnd < ichLim)
+            while (ichEnd < span.Length)
             {
-                if (!char.IsWhiteSpace(s[ichEnd]))
+                if (!char.IsWhiteSpace(span[ichEnd]))
                     return Result.Extra;
                 ichEnd++;
             }
@@ -168,15 +209,15 @@ namespace Microsoft.ML.Runtime.Internal.Utilities
             return Result.Good;
         }
 
-        public static bool TryParse(out Single value, string s, int ichMin, int ichLim, out int ichEnd)
+        public static bool TryParse(ReadOnlySpan<char> span, out Single value, out int ichEnd, OptionFlags flags = OptionFlags.Default)
         {
             bool neg = false;
             ulong num = 0;
             long exp = 0;
 
-            ichEnd = ichMin;
-            if (!TryParseCore(s, ref ichEnd, ichLim, ref neg, ref num, ref exp))
-                return TryParseSpecial(out value, s, ref ichEnd, ichLim);
+            ichEnd = 0;
+            if (!TryParseCore(span, ref ichEnd, ref neg, ref num, ref exp, flags))
+                return TryParseSpecial(span, ref ichEnd, out value);
 
             if (num == 0)
             {
@@ -231,7 +272,7 @@ namespace Microsoft.ML.Runtime.Internal.Utilities
 #if COMPARE_BCL
             if (!_failed)
             {
-                string str = s.Substring(ichMin, ichEnd - ichMin);
+                string str = span.ToString();
                 Single x;
                 if (!Single.TryParse(str, out x))
                 {
@@ -257,15 +298,15 @@ namespace Microsoft.ML.Runtime.Internal.Utilities
             return true;
         }
 
-        public static bool TryParse(out Double value, string s, int ichMin, int ichLim, out int ichEnd)
+        public static bool TryParse(ReadOnlySpan<char> span, out Double value, out int ichEnd, OptionFlags flags = OptionFlags.Default)
         {
             bool neg = false;
             ulong num = 0;
             long exp = 0;
 
-            ichEnd = ichMin;
-            if (!TryParseCore(s, ref ichEnd, ichLim, ref neg, ref num, ref exp))
-                return TryParseSpecial(out value, s, ref ichEnd, ichLim);
+            ichEnd = 0;
+            if (!TryParseCore(span, ref ichEnd, ref neg, ref num, ref exp, flags))
+                return TryParseSpecial(span, ref ichEnd, out value);
 
             if (num == 0)
             {
@@ -345,7 +386,7 @@ namespace Microsoft.ML.Runtime.Internal.Utilities
             // Taking the high 64 bits of the 128 bit result should give us enough bits to get the
             // right answer most of the time. Note, that it's not guaranteed that we always get the
             // right answer. Guaranteeing that takes much more work.... See the paper by David Gay at
-            // http://www.ampl.com/REFS/rounding.pdf.
+            // https://www.ampl.com/REFS/rounding.pdf.
             Contracts.Assert((num & TopTwoBits) != 0);
             Contracts.Assert((mul & TopBit) != 0);
 
@@ -413,7 +454,7 @@ namespace Microsoft.ML.Runtime.Internal.Utilities
                 value = -value;
 
 #if COMPARE_BCL
-            string str = s.Substring(ichMin, ichEnd - ichMin);
+            string str = span.ToString();
             Double x;
             if (!Double.TryParse(str, out x))
             {
@@ -440,64 +481,64 @@ namespace Microsoft.ML.Runtime.Internal.Utilities
             return true;
         }
 
-        private static bool TryParseSpecial(out Double value, string s, ref int ich, int ichLim)
+        private static bool TryParseSpecial(ReadOnlySpan<char> span, ref int ich, out Double value)
         {
             Single tmp;
-            bool res = TryParseSpecial(out tmp, s, ref ich, ichLim);
+            bool res = TryParseSpecial(span, ref ich, out tmp);
             value = tmp;
             return res;
         }
 
-        private static bool TryParseSpecial(out Single value, string s, ref int ich, int ichLim)
+        private static bool TryParseSpecial(ReadOnlySpan<char> span, ref int ich, out Single value)
         {
-            if (ich < ichLim)
+            if (ich < span.Length)
             {
-                switch (s[ich])
+                switch (span[ich])
                 {
-                case '?':
-                    // We also interpret ? to mean NaN.
-                    value = Single.NaN;
-                    ich += 1;
-                    return true;
-
-                case 'N':
-                    if (ich + 3 <= ichLim && s[ich + 1] == 'a' && s[ich + 2] == 'N')
-                    {
+                    case '?':
+                        // We also interpret ? to mean NaN.
                         value = Single.NaN;
-                        ich += 3;
+                        ich += 1;
                         return true;
-                    }
-                    break;
 
-                case 'I':
-                    if (ich + 8 <= ichLim && s[ich + 1] == 'n' && s[ich + 2] == 'f' && s[ich + 3] == 'i' && s[ich + 4] == 'n' && s[ich + 5] == 'i' && s[ich + 6] == 't' && s[ich + 7] == 'y')
-                    {
+                    case 'N':
+                        if (ich + 3 <= span.Length && span[ich + 1] == 'a' && span[ich + 2] == 'N')
+                        {
+                            value = Single.NaN;
+                            ich += 3;
+                            return true;
+                        }
+                        break;
+
+                    case 'I':
+                        if (ich + 8 <= span.Length && span[ich + 1] == 'n' && span[ich + 2] == 'f' && span[ich + 3] == 'i' && span[ich + 4] == 'n' && span[ich + 5] == 'i' && span[ich + 6] == 't' && span[ich + 7] == 'y')
+                        {
+                            value = Single.PositiveInfinity;
+                            ich += 8;
+                            return true;
+                        }
+                        break;
+
+                    case '-':
+                        if (ich + 2 <= span.Length && span[ich + 1] == InfinitySymbol)
+                        {
+                            value = Single.NegativeInfinity;
+                            ich += 2;
+                            return true;
+                        }
+
+                        if (ich + 9 <= span.Length && span[ich + 1] == 'I' && span[ich + 2] == 'n' && span[ich + 3] == 'f' && span[ich + 4] == 'i' && span[ich + 5] == 'n' && span[ich + 6] == 'i' && span[ich + 7] == 't' && span[ich + 8] == 'y')
+                        {
+                            value = Single.NegativeInfinity;
+                            ich += 9;
+                            return true;
+                        }
+                        break;
+
+                    case InfinitySymbol:
                         value = Single.PositiveInfinity;
-                        ich += 8;
+                        ich += 1;
                         return true;
-                    }
-                    break;
-
-                case '-':
-                    if (ich + 2 <= ichLim && s[ich + 1] == InfinitySymbol)
-                    {
-                        value = Single.NegativeInfinity;
-                        ich += 2;
-                        return true;
-                    }
-
-                    if (ich + 9 <= ichLim && s[ich + 1] == 'I' && s[ich + 2] == 'n' && s[ich + 3] == 'f' && s[ich + 4] == 'i' && s[ich + 5] == 'n' && s[ich + 6] == 'i' && s[ich + 7] == 't' && s[ich + 8] == 'y')
-                    {
-                        value = Single.NegativeInfinity;
-                        ich += 9;
-                        return true;
-                    }
-                    break;
-
-                case InfinitySymbol:
-                    value = Single.PositiveInfinity;
-                    ich += 1;
-                    return true;
                 }
             }
 
@@ -505,15 +546,20 @@ namespace Microsoft.ML.Runtime.Internal.Utilities
             return false;
         }
 
-        private static bool TryParseCore(string s, ref int ich, int ichLim, ref bool neg, ref ulong num, ref long exp)
+        private static bool TryParseCore(ReadOnlySpan<char> span, ref int ich, ref bool neg, ref ulong num, ref long exp, OptionFlags flags = OptionFlags.Default)
         {
-            Contracts.AssertValue(s);
-            Contracts.Assert(0 <= ich & ich <= ichLim & ichLim <= s.Length);
+            Contracts.Assert(0 <= ich & ich <= span.Length);
             Contracts.Assert(!neg);
             Contracts.Assert(num == 0);
             Contracts.Assert(exp == 0);
 
-            if (ich >= ichLim)
+            char decimalMarker;
+            if ((flags & OptionFlags.UseCommaAsDecimalMarker) != 0)
+                decimalMarker = ',';
+            else
+                decimalMarker = '.';
+
+            if (ich >= span.Length)
                 return false;
 
             // If num gets bigger than this, we don't process additional digits.
@@ -524,45 +570,51 @@ namespace Microsoft.ML.Runtime.Internal.Utilities
 
             // Get started: handle sign
             int i = ich;
-            switch (s[i])
+            switch (span[i])
             {
-            default:
-                return false;
-
-            case '-':
-                if (++i >= ichLim)
+                default:
                     return false;
-                neg = true;
-                break;
 
-            case '+':
-                if (++i >= ichLim)
-                    return false;
-                break;
+                case '-':
+                    if (++i >= span.Length)
+                        return false;
+                    neg = true;
+                    break;
 
-            case '.':
-                goto LPoint;
+                case '+':
+                    if (++i >= span.Length)
+                        return false;
+                    break;
 
-            // The common cases.
-            case '0':
-            case '1':
-            case '2':
-            case '3':
-            case '4':
-            case '5':
-            case '6':
-            case '7':
-            case '8':
-            case '9':
-                break;
+                case '.':
+                    if (decimalMarker != '.') // Decimal marker was not '.', but we encountered a '.', which must be an error.
+                        return false; // Since this was an error, return false, which will later make the caller to set NaN as the out value.
+                    goto LPoint;
+                case ',':
+                    if (decimalMarker != ',') // Same logic as above.
+                        return false;
+                    goto LPoint;
+
+                // The common cases.
+                case '0':
+                case '1':
+                case '2':
+                case '3':
+                case '4':
+                case '5':
+                case '6':
+                case '7':
+                case '8':
+                case '9':
+                    break;
             }
 
-            // Get digits before '.'
+            // Get digits before the decimal marker, which may be '.' or ','
             uint d;
             for (; ; )
             {
-                Contracts.Assert(i < ichLim);
-                if ((d = (uint)s[i] - '0') > 9)
+                Contracts.Assert(i < span.Length);
+                if ((d = (uint)span[i] - '0') > 9)
                     break;
 
                 digits = true;
@@ -571,33 +623,33 @@ namespace Microsoft.ML.Runtime.Internal.Utilities
                 else
                     exp++;
 
-                if (++i >= ichLim)
+                if (++i >= span.Length)
                 {
                     ich = i;
                     return true;
                 }
             }
-            Contracts.Assert(i < ichLim);
+            Contracts.Assert(i < span.Length);
 
-            if (s[i] != '.')
+            if (span[i] != decimalMarker)
                 goto LAfterDigits;
 
-        LPoint:
-            Contracts.Assert(i < ichLim);
-            Contracts.Assert(s[i] == '.');
+            LPoint:
+            Contracts.Assert(i < span.Length);
+            Contracts.Assert(span[i] == decimalMarker);
 
-            // Get the digits after '.'
+            // Get the digits after the decimal marker, which may be '.' or ','
             for (; ; )
             {
-                if (++i >= ichLim)
+                if (++i >= span.Length)
                 {
                     if (digits)
                         ich = i;
                     return digits;
                 }
 
-                Contracts.Assert(i < ichLim);
-                if ((d = (uint)s[i] - '0') > 9)
+                Contracts.Assert(i < span.Length);
+                if ((d = (uint)span[i] - '0') > 9)
                     break;
 
                 digits = true;
@@ -609,7 +661,7 @@ namespace Microsoft.ML.Runtime.Internal.Utilities
             }
 
         LAfterDigits:
-            Contracts.Assert(i < ichLim);
+            Contracts.Assert(i < span.Length);
             if (!digits)
                 return false;
 
@@ -617,32 +669,32 @@ namespace Microsoft.ML.Runtime.Internal.Utilities
             ich = i;
 
             // Check for an exponent.
-            switch (s[i])
+            switch (span[i])
             {
-            default:
-                return true;
-
-            case 'e':
-            case 'E':
-                if (++i >= ichLim)
+                default:
                     return true;
-                break;
+
+                case 'e':
+                case 'E':
+                    if (++i >= span.Length)
+                        return true;
+                    break;
             }
 
             // Handle the exponent sign.
             bool expNeg = false;
-            Contracts.Assert(i < ichLim);
-            switch (s[i])
+            Contracts.Assert(i < span.Length);
+            switch (span[i])
             {
-            case '-':
-                if (++i >= ichLim)
-                    return true;
-                expNeg = true;
-                break;
-            case '+':
-                if (++i >= ichLim)
-                    return true;
-                break;
+                case '-':
+                    if (++i >= span.Length)
+                        return true;
+                    expNeg = true;
+                    break;
+                case '+':
+                    if (++i >= span.Length)
+                        return true;
+                    break;
             }
 
             // If the exponent exceeds this, the result will be infinite or zero
@@ -656,14 +708,14 @@ namespace Microsoft.ML.Runtime.Internal.Utilities
             long e = 0;
             for (; ; )
             {
-                Contracts.Assert(i < ichLim);
-                if ((d = (uint)s[i] - '0') > 9)
+                Contracts.Assert(i < span.Length);
+                if ((d = (uint)span[i] - '0') > 9)
                     break;
 
                 digits = true;
                 if (e < eMax)
                     e = 10 * e + (int)d;
-                if (++i >= ichLim)
+                if (++i >= span.Length)
                     break;
             }
 

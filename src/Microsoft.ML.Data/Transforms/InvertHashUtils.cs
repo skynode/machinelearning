@@ -6,13 +6,14 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
-using Microsoft.ML.Runtime.Data.IO;
-using Microsoft.ML.Runtime.Internal.Utilities;
-using Microsoft.ML.Runtime.Model;
+using Microsoft.ML.Data.IO;
+using Microsoft.ML.Internal.Utilities;
+using Microsoft.ML.Runtime;
 
-namespace Microsoft.ML.Runtime.Data
+namespace Microsoft.ML.Data
 {
-    public static class InvertHashUtils
+    [BestFriend]
+    internal static class InvertHashUtils
     {
         /// <summary>
         /// Clears a destination StringBuilder. If it is currently null, allocates it.
@@ -31,45 +32,45 @@ namespace Microsoft.ML.Runtime.Data
         /// This StringBuilder representation will be a component of the composed KeyValues for the
         /// hash outputs.
         /// </summary>
-        public static ValueMapper<T, StringBuilder> GetSimpleMapper<T>(ISchema schema, int col)
+        public static ValueMapper<T, StringBuilder> GetSimpleMapper<T>(DataViewSchema schema, int col)
         {
             Contracts.AssertValue(schema);
-            Contracts.Assert(0 <= col && col < schema.ColumnCount);
-            var type = schema.GetColumnType(col).ItemType;
+            Contracts.Assert(0 <= col && col < schema.Count);
+            var type = schema[col].Type.GetItemType();
             Contracts.Assert(type.RawType == typeof(T));
-            var conv = Conversion.Conversions.Instance;
+            var conv = Conversion.Conversions.DefaultInstance;
 
-            // First: if not key, then get the standard string converison.
-            if (!type.IsKey)
+            // First: if not key, then get the standard string conversion.
+            if (!(type is KeyDataViewType keyType))
                 return conv.GetStringConversion<T>(type);
 
             bool identity;
             // Second choice: if key, utilize the KeyValues metadata for that key, if it has one and is text.
-            if (schema.HasKeyNames(col, type.KeyCount))
+            if (schema[col].HasKeyValues())
             {
                 // REVIEW: Non-textual KeyValues are certainly possible. Should we handle them?
                 // Get the key names.
-                VBuffer<DvText> keyValues = default(VBuffer<DvText>);
-                schema.GetMetadata(MetadataUtils.Kinds.KeyValues, col, ref keyValues);
-                DvText value = default(DvText);
+                VBuffer<ReadOnlyMemory<char>> keyValues = default;
+                schema[col].GetKeyValues(ref keyValues);
+                ReadOnlyMemory<char> value = default;
 
                 // REVIEW: We could optimize for identity, but it's probably not worthwhile.
-                var keyMapper = conv.GetStandardConversion<T, uint>(type, NumberType.U4, out identity);
+                var keyMapper = conv.GetStandardConversion<T, uint>(type, NumberDataViewType.UInt32, out identity);
                 return
-                    (ref T src, ref StringBuilder dst) =>
+                    (in T src, ref StringBuilder dst) =>
                     {
                         ClearDst(ref dst);
                         uint intermediate = 0;
-                        keyMapper(ref src, ref intermediate);
+                        keyMapper(in src, ref intermediate);
                         if (intermediate == 0)
                             return;
                         keyValues.GetItemOrDefault((int)(intermediate - 1), ref value);
-                        value.AddToStringBuilder(dst);
+                        dst.AppendMemory(value);
                     };
             }
 
             // Third choice: just use the key value itself, subject to offsetting by the min.
-            return conv.GetKeyStringConversion<T>(type.AsKey);
+            return conv.GetKeyStringConversion<T>(keyType);
         }
 
         public static ValueMapper<KeyValuePair<int, T>, StringBuilder> GetPairMapper<T>(ValueMapper<T, StringBuilder> submap)
@@ -77,13 +78,13 @@ namespace Microsoft.ML.Runtime.Data
             StringBuilder sb = null;
             char[] buffer = null;
             return
-                (ref KeyValuePair<int, T> pair, ref StringBuilder dst) =>
+                (in KeyValuePair<int, T> pair, ref StringBuilder dst) =>
                 {
                     ClearDst(ref dst);
                     dst.Append(pair.Key);
                     dst.Append(':');
                     var subval = pair.Value;
-                    submap(ref subval, ref sb);
+                    submap(in subval, ref sb);
                     AppendToEnd(sb, dst, ref buffer);
                 };
         }
@@ -100,14 +101,15 @@ namespace Microsoft.ML.Runtime.Data
         }
     }
 
-    public sealed class InvertHashCollector<T>
+    [BestFriend]
+    internal sealed class InvertHashCollector<T>
     {
         /// <summary>
         /// This is a small struct that is meant to compare akin to the value,
         /// but also maintain the order in which it was inserted, assuming that
         /// we're using something like a hashset where order is not preserved.
         /// </summary>
-        private struct Pair
+        private readonly struct Pair
         {
             public readonly T Value;
             public readonly int Order;
@@ -164,7 +166,7 @@ namespace Microsoft.ML.Runtime.Data
         /// <param name="copier">For copying input values into a value to actually store. Useful for
         /// types of objects where it is possible to do a comparison relatively quickly on some sort
         /// of "unsafe" object, but for which when we decide to actually store it we need to provide
-        /// a "safe" version of the object. Utilized in the ngram hash transform, for example.</param>
+        /// a "safe" version of the object. Utilized in the n-gram hash transform, for example.</param>
         public InvertHashCollector(int slots, int maxCount, ValueMapper<T, StringBuilder> mapper,
             IEqualityComparer<T> comparer, ValueMapper<T, T> copier = null)
         {
@@ -178,10 +180,10 @@ namespace Microsoft.ML.Runtime.Data
             _stringifyMapper = mapper;
             _comparer = new PairEqualityComparer(comparer);
             _slotToValueSet = new Dictionary<int, HashSet<Pair>>();
-            _copier = copier ?? ((ref T src, ref T dst) => dst = src);
+            _copier = copier ?? ((in T src, ref T dst) => dst = src);
         }
 
-        private DvText Textify(ref StringBuilder sb, ref StringBuilder temp, ref char[] cbuffer, ref Pair[] buffer, HashSet<Pair> pairs)
+        private ReadOnlyMemory<char> Textify(ref StringBuilder sb, ref StringBuilder temp, ref char[] cbuffer, ref Pair[] buffer, HashSet<Pair> pairs)
         {
             Contracts.AssertValueOrNull(sb);
             Contracts.AssertValueOrNull(temp);
@@ -199,8 +201,8 @@ namespace Microsoft.ML.Runtime.Data
             if (count == 1)
             {
                 var value = buffer[0].Value;
-                _stringifyMapper(ref value, ref temp);
-                return Utils.Size(temp) > 0 ? new DvText(temp.ToString()) : DvText.Empty;
+                _stringifyMapper(in value, ref temp);
+                return Utils.Size(temp) > 0 ? temp.ToString().AsMemory() : String.Empty.AsMemory();
             }
 
             Array.Sort(buffer, 0, count, Comparer<Pair>.Create((x, y) => x.Order - y.Order));
@@ -215,16 +217,16 @@ namespace Microsoft.ML.Runtime.Data
                 if (i > 0)
                     sb.Append(',');
                 var value = pair.Value;
-                _stringifyMapper(ref value, ref temp);
+                _stringifyMapper(in value, ref temp);
                 InvertHashUtils.AppendToEnd(temp, sb, ref cbuffer);
             }
             sb.Append('}');
-            var retval = new DvText(sb.ToString());
+            var retval = sb.ToString().AsMemory();
             sb.Clear();
             return retval;
         }
 
-        public VBuffer<DvText> GetMetadata()
+        public VBuffer<ReadOnlyMemory<char>> GetMetadata()
         {
             int count = _slotToValueSet.Count;
             Contracts.Assert(count <= _slots);
@@ -238,7 +240,7 @@ namespace Microsoft.ML.Runtime.Data
             {
                 // Sparse
                 var indices = new int[count];
-                var values = new DvText[count];
+                var values = new ReadOnlyMemory<char>[count];
                 int i = 0;
                 foreach (var p in _slotToValueSet)
                 {
@@ -248,18 +250,18 @@ namespace Microsoft.ML.Runtime.Data
                 }
                 Contracts.Assert(i == count);
                 Array.Sort(indices, values);
-                return new VBuffer<DvText>((int)_slots, count, values, indices);
+                return new VBuffer<ReadOnlyMemory<char>>((int)_slots, count, values, indices);
             }
             else
             {
                 // Dense
-                var values = new DvText[_slots];
+                var values = new ReadOnlyMemory<char>[_slots];
                 foreach (var p in _slotToValueSet)
                 {
                     Contracts.Assert(0 <= p.Key && p.Key < _slots);
                     values[p.Key] = Textify(ref sb, ref temp, ref cbuffer, ref pairs, p.Value);
                 }
-                return new VBuffer<DvText>(values.Length, values);
+                return new VBuffer<ReadOnlyMemory<char>>(values.Length, values);
             }
         }
 
@@ -293,7 +295,7 @@ namespace Microsoft.ML.Runtime.Data
             else
                 pairSet = _slotToValueSet[dstSlot] = new HashSet<Pair>(_comparer);
             T dst = default(T);
-            _copier(ref key, ref dst);
+            _copier(in key, ref dst);
             pairSet.Add(new Pair(dst, pairSet.Count));
         }
 
@@ -315,10 +317,11 @@ namespace Microsoft.ML.Runtime.Data
     }
 
     /// <summary>
-    /// Simple utility class for saving a <see cref="VBuffer{T}"/> of <see cref="DvText"/>
+    /// Simple utility class for saving a <see cref="VBuffer{T}"/> of ReadOnlyMemory
     /// as a model, both in a binary and more easily human readable form.
     /// </summary>
-    public static class TextModelHelper
+    [BestFriend]
+    internal static class TextModelHelper
     {
         private const string LoaderSignature = "TextSpanBuffer";
 
@@ -329,17 +332,18 @@ namespace Microsoft.ML.Runtime.Data
                 verWrittenCur: 0x00010001, // Initial
                 verReadableCur: 0x00010001,
                 verWeCanReadBack: 0x00010001,
-                loaderSignature: LoaderSignature);
+                loaderSignature: LoaderSignature,
+                loaderAssemblyName: typeof(TextModelHelper).Assembly.FullName);
         }
 
-        private static void Load(IChannel ch, ModelLoadContext ctx, CodecFactory factory, ref VBuffer<DvText> values)
+        private static void Load(IChannel ch, ModelLoadContext ctx, CodecFactory factory, ref VBuffer<ReadOnlyMemory<char>> values)
         {
             Contracts.AssertValue(ch);
             ch.CheckValue(ctx, nameof(ctx));
             ctx.CheckAtModel(GetVersionInfo());
 
             // *** Binary format ***
-            // Codec parameterization: A codec parameterization that should be a VBuffer<DvText> codec
+            // Codec parameterization: A codec parameterization that should be a ReadOnlyMemory codec
             // int: n, the number of bytes used to write the values
             // byte[n]: As encoded using the codec
 
@@ -353,9 +357,10 @@ namespace Microsoft.ML.Runtime.Data
             if (!factory.TryReadCodec(ctx.Reader.BaseStream, out codec))
                 throw ch.ExceptDecode();
             ch.AssertValue(codec);
-            ch.CheckDecode(codec.Type.IsVector);
-            ch.CheckDecode(codec.Type.ItemType.IsText);
-            var textCodec = (IValueCodec<VBuffer<DvText>>)codec;
+            if (!(codec.Type is VectorDataViewType vectorType))
+                throw ch.ExceptDecode();
+            ch.CheckDecode(vectorType.ItemType is TextDataViewType);
+            var textCodec = (IValueCodec<VBuffer<ReadOnlyMemory<char>>>)codec;
 
             var bufferLen = ctx.Reader.ReadInt32();
             ch.CheckDecode(bufferLen >= 0);
@@ -364,14 +369,14 @@ namespace Microsoft.ML.Runtime.Data
                 using (var reader = textCodec.OpenReader(stream, 1))
                 {
                     reader.MoveNext();
-                    values = default(VBuffer<DvText>);
+                    values = default(VBuffer<ReadOnlyMemory<char>>);
                     reader.Get(ref values);
                 }
                 ch.CheckDecode(stream.ReadByte() == -1);
             }
         }
 
-        private static void Save(IChannel ch, ModelSaveContext ctx, CodecFactory factory, ref VBuffer<DvText> values)
+        private static void Save(IChannel ch, ModelSaveContext ctx, CodecFactory factory, in VBuffer<ReadOnlyMemory<char>> values)
         {
             Contracts.AssertValue(ch);
             ch.CheckValue(ctx, nameof(ctx));
@@ -379,25 +384,25 @@ namespace Microsoft.ML.Runtime.Data
             ctx.SetVersionInfo(GetVersionInfo());
 
             // *** Binary format ***
-            // Codec parameterization: A codec parameterization that should be a VBuffer<DvText> codec
+            // Codec parameterization: A codec parameterization that should be a ReadOnlyMemory codec
             // int: n, the number of bytes used to write the values
             // byte[n]: As encoded using the codec
 
             // Get the codec from the factory
             IValueCodec codec;
-            var result = factory.TryGetCodec(new VectorType(TextType.Instance), out codec);
+            var result = factory.TryGetCodec(new VectorDataViewType(TextDataViewType.Instance), out codec);
             ch.Assert(result);
-            ch.Assert(codec.Type.IsVector);
-            ch.Assert(codec.Type.VectorSize == 0);
-            ch.Assert(codec.Type.ItemType.RawType == typeof(DvText));
-            IValueCodec<VBuffer<DvText>> textCodec = (IValueCodec<VBuffer<DvText>>)codec;
+            VectorDataViewType vectorType = (VectorDataViewType)codec.Type;
+            ch.Assert(vectorType.Size == 0);
+            ch.Assert(vectorType.ItemType == TextDataViewType.Instance);
+            IValueCodec<VBuffer<ReadOnlyMemory<char>>> textCodec = (IValueCodec<VBuffer<ReadOnlyMemory<char>>>)codec;
 
             factory.WriteCodec(ctx.Writer.BaseStream, codec);
             using (var mem = new MemoryStream())
             {
                 using (var writer = textCodec.OpenWriter(mem))
                 {
-                    writer.Write(ref values);
+                    writer.Write(in values);
                     writer.Commit();
                 }
                 ctx.Writer.WriteByteArray(mem.ToArray());
@@ -411,7 +416,7 @@ namespace Microsoft.ML.Runtime.Data
             ctx.SaveTextStream("Terms.txt",
                 writer =>
                 {
-                    writer.WriteLine("# Number of terms = {0} of length {1}", v.Count, v.Length);
+                    writer.WriteLine("# Number of terms = {0} of length {1}", v.GetValues().Length, v.Length);
                     foreach (var pair in v.Items())
                     {
                         var text = pair.Value;
@@ -420,22 +425,23 @@ namespace Microsoft.ML.Runtime.Data
                         writer.Write("{0}\t", pair.Key);
                         // REVIEW: What about escaping this, *especially* for linebreaks?
                         // Do C# and .NET really have no equivalent to Python's "repr"? :(
-                        if (!text.HasChars)
+                        if (text.IsEmpty)
                         {
                             writer.WriteLine();
                             continue;
                         }
                         Utils.EnsureSize(ref buffer, text.Length);
-                        int ichMin;
-                        int ichLim;
-                        string str = text.GetRawUnderlyingBufferInfo(out ichMin, out ichLim);
-                        str.CopyTo(ichMin, buffer, 0, text.Length);
+
+                        var span = text.Span;
+                        for (int i = 0; i < text.Length; i++)
+                            buffer[i] = span[i];
+
                         writer.WriteLine(buffer, 0, text.Length);
                     }
                 });
         }
 
-        public static void LoadAll(IHost host, ModelLoadContext ctx, int infoLim, out VBuffer<DvText>[] keyValues, out ColumnType[] kvTypes)
+        public static void LoadAll(IHost host, ModelLoadContext ctx, int infoLim, out VBuffer<ReadOnlyMemory<char>>[] keyValues, out VectorDataViewType[] kvTypes)
         {
             Contracts.AssertValue(host);
             host.AssertValue(ctx);
@@ -443,8 +449,8 @@ namespace Microsoft.ML.Runtime.Data
             using (var ch = host.Start("LoadTextValues"))
             {
                 // Try to find the key names.
-                VBuffer<DvText>[] keyValuesLocal = null;
-                ColumnType[] kvTypesLocal = null;
+                VBuffer<ReadOnlyMemory<char>>[] keyValuesLocal = null;
+                VectorDataViewType[] kvTypesLocal = null;
                 CodecFactory factory = null;
                 const string dirFormat = "Vocabulary_{0:000}";
                 for (int iinfo = 0; iinfo < infoLim; iinfo++)
@@ -455,22 +461,21 @@ namespace Microsoft.ML.Runtime.Data
                             // Load the lazily initialized structures, if needed.
                             if (keyValuesLocal == null)
                             {
-                                keyValuesLocal = new VBuffer<DvText>[infoLim];
-                                kvTypesLocal = new ColumnType[infoLim];
+                                keyValuesLocal = new VBuffer<ReadOnlyMemory<char>>[infoLim];
+                                kvTypesLocal = new VectorDataViewType[infoLim];
                                 factory = new CodecFactory(host);
                             }
                             Load(ch, c, factory, ref keyValuesLocal[iinfo]);
-                            kvTypesLocal[iinfo] = new VectorType(TextType.Instance, keyValuesLocal[iinfo].Length);
+                            kvTypesLocal[iinfo] = new VectorDataViewType(TextDataViewType.Instance, keyValuesLocal[iinfo].Length);
                         });
                 }
 
                 keyValues = keyValuesLocal;
                 kvTypes = kvTypesLocal;
-                ch.Done();
             }
         }
 
-        public static void SaveAll(IHost host, ModelSaveContext ctx, int infoLim, VBuffer<DvText>[] keyValues)
+        public static void SaveAll(IHost host, ModelSaveContext ctx, int infoLim, VBuffer<ReadOnlyMemory<char>>[] keyValues)
         {
             Contracts.AssertValue(host);
             host.AssertValue(ctx);
@@ -490,9 +495,8 @@ namespace Microsoft.ML.Runtime.Data
                     if (keyValues[iinfo].Length == 0)
                         continue;
                     ctx.SaveSubModel(string.Format(dirFormat, iinfo),
-                        c => Save(ch, c, factory, ref keyValues[iinfo]));
+                        c => Save(ch, c, factory, in keyValues[iinfo]));
                 }
-                ch.Done();
             }
         }
     }

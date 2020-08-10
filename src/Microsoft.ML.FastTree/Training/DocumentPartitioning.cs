@@ -6,8 +6,9 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using Microsoft.ML.Runtime;
 
-namespace Microsoft.ML.Runtime.FastTree.Internal
+namespace Microsoft.ML.Trainers.FastTree
 {
 #if USE_SINGLE_PRECISION
     using FloatType = System.Single;
@@ -15,7 +16,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
     using FloatType = System.Double;
 #endif
 
-    public sealed class DocumentPartitioning
+    internal sealed class DocumentPartitioning
     {
         private readonly int[] _leafBegin;
         private readonly int[] _leafCount;
@@ -50,7 +51,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
         /// Constructs partitioning object based on the documents and RegressionTree splits
         /// NOTE: It has been optimized for speed and multiprocs with 10x gain on naive LINQ implementation
         /// </summary>
-        public DocumentPartitioning(RegressionTree tree, Dataset dataset)
+        internal DocumentPartitioning(InternalRegressionTree tree, Dataset dataset)
             : this(dataset.NumDocs, tree.NumLeaves)
         {
             using (Timer.Time(TimerEvent.DocumentPartitioningConstruction))
@@ -66,7 +67,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
                     ++numChunks;
                 var perChunkDocumentLists = new List<int>[numChunks][];
                 // REVIEW: This partitioning doesn't look optimal.
-                // Probably make sence to investigate better ways of splitting data?
+                // Probably make sense to investigate better ways of splitting data?
                 var actions = new Action[(int)Math.Ceiling(1.0 * dataset.NumDocs / innerLoopSize)];
                 var actionIndex = 0;
                 for (int docStart = 0; docStart < dataset.NumDocs; docStart += innerLoopSize)
@@ -238,7 +239,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
         /// </summary>
         /// <param name="leaf">the leaf being split</param>
         /// <param name="bins">Split feature flock's bin</param>
-        /// <param name="categoricalIndices">Catgeorical feature indices</param>
+        /// <param name="categoricalIndices">Categorical feature indices</param>
         /// <param name="gtChildIndex">Index of child node that contains documents whose split
         /// feature value is greater than the split threshold</param>
         public unsafe void Split(int leaf, IntArray bins, HashSet<int> categoricalIndices, int gtChildIndex)

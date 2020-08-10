@@ -5,8 +5,9 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Microsoft.ML.Runtime;
 
-namespace Microsoft.ML.Runtime.FastTree.Internal
+namespace Microsoft.ML.Trainers.FastTree
 {
 #if USE_SINGLE_PRECISION
     using FloatType = Single;
@@ -90,7 +91,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
         /// Writes a binary representation of this class to a byte buffer, at a given position.
         /// The position is incremented to the end of the representation
         /// </summary>
-        /// <param name="buffer">a byte array where the binary represenaion is written</param>
+        /// <param name="buffer">a byte array where the binary representation is written</param>
         /// <param name="position">the position in the byte array</param>
         public override void ToByteArray(byte[] buffer, ref int position)
         {
@@ -103,11 +104,6 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
         public override int SizeInBytes()
         {
             return _values.SizeInBytes() + _deltas.SizeInBytes() + sizeof(int) + base.SizeInBytes();
-        }
-
-        public override MD5Hash MD5Hash
-        {
-            get { return MD5Hasher.Hash(_deltas) ^ _values.MD5Hash; }
         }
 
         public override int Length { get { return _length; } }

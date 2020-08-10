@@ -1,23 +1,24 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
+using Microsoft.ML.Runtime;
 
-namespace Microsoft.ML.Runtime.FastTree.Internal
+namespace Microsoft.ML.Trainers.FastTree
 {
     // Conjugate gradient descent
-    public class ConjugateGradientDescent : GradientDescent
+    internal class ConjugateGradientDescent : GradientDescent
     {
         private double[] _previousGradient;
         private double[] _currentGradient;
         private double[] _currentDk;
 
-        public ConjugateGradientDescent(Ensemble ensemble, Dataset trainData, double[] initTrainScores, IGradientAdjuster gradientWrapper)
+        public ConjugateGradientDescent(InternalTreeEnsemble ensemble, Dataset trainData, double[] initTrainScores, IGradientAdjuster gradientWrapper)
             : base(ensemble, trainData, initTrainScores, gradientWrapper)
         {
             _currentDk = new double[trainData.NumDocs];
         }
 
-        protected override double[] GetGradient(IChannel ch)
+        private protected override double[] GetGradient(IChannel ch)
         {
             Contracts.AssertValue(ch);
             _previousGradient = _currentGradient;
@@ -45,7 +46,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
             ch.Info("beta: {0}", beta);
             VectorUtils.MutiplyInPlace(previousDk, beta);
             VectorUtils.AddInPlace(previousDk, _currentGradient);
-            _currentDk = previousDk; // Reallay no-op opration
+            _currentDk = previousDk; // Really no-op operation
 
             // We know that LeastSquaresRegressionTreeLearner does not destroy gradients so we can return our reference that we will need in next iter.
             if (TreeLearner is LeastSquaresRegressionTreeLearner)

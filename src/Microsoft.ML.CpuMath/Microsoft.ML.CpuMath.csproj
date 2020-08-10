@@ -1,30 +1,34 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <Configurations>Debug;Release;Debug-Intrinsics;Release-Intrinsics</Configurations>
-    <TargetFramework Condition="'$(UseIntrinsics)' != 'true'">netstandard2.0</TargetFramework>
-    <TargetFrameworks Condition="'$(UseIntrinsics)' == 'true'">netstandard2.0;netcoreapp3.0</TargetFrameworks>
+    <TargetFrameworks>netstandard2.0;netcoreapp3.1</TargetFrameworks>
     <IncludeInPackage>Microsoft.ML.CpuMath</IncludeInPackage>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <DefineConstants>$(DefineConstants);CORECLR;PRIVATE_CONTRACTS</DefineConstants>
-    <LangVersion>7.3</LangVersion>
+    <DefineConstants>$(DefineConstants);CPUMATH_INFRASTRUCTURE</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
     <Compile Include="..\Microsoft.ML.Core\Utilities\Contracts.cs" />
+    <Compile Include="..\Microsoft.ML.Core\BestFriendAttribute.cs" />
+    <Compile Include="..\Microsoft.ML.Core\PublicKey.cs" />
 
     <!-- Workaround https://github.com/dotnet/project-system/issues/935 -->
     <None Include="**/*.cs" />
   </ItemGroup>
 
-  <ItemGroup Condition="'$(TargetFramework)' == 'netcoreapp3.0'">
+  <ItemGroup Condition="'$(TargetFramework)' == 'netcoreapp3.1'">
     <Compile Remove="CpuMathUtils.netstandard.cs" />
-    <!-- This is only needed until https://github.com/dotnet/corefx/issues/31064 is addressed. -->
-    <PackageReference Include="System.Runtime.Intrinsics.Experimental" Version="4.6.0-preview1-26708-04" />
+    <Compile Remove="FactorizationMachine/FactorizationMachineInterface.netstandard.cs" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
     <Compile Remove="CpuMathUtils.netcoreapp.cs" />
     <Compile Remove="SseIntrinsics.cs" />
+    <Compile Remove="AvxIntrinsics.cs" />
+    <Compile Remove="FactorizationMachine/FactorizationMachineInterface.netcoreapp.cs" />
+    <Compile Remove="FactorizationMachine/AvxIntrinsics.cs" />
+
+    <PackageReference Include="System.Memory" Version="$(SystemMemoryVersion)" />
   </ItemGroup>
+
 </Project>

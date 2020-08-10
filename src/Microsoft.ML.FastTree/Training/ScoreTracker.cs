@@ -5,10 +5,11 @@
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using Microsoft.ML.Runtime;
 
-namespace Microsoft.ML.Runtime.FastTree.Internal
+namespace Microsoft.ML.Trainers.FastTree
 {
-    public class ScoreTracker
+    internal class ScoreTracker
     {
         public string DatasetName;
         public Dataset Dataset;
@@ -37,7 +38,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
         }
 
         //Creates linear combination of scores1 + tree * multiplier
-        public void Initialize(ScoreTracker scores1, RegressionTree tree, DocumentPartitioning partitioning, double multiplier)
+        internal void Initialize(ScoreTracker scores1, InternalRegressionTree tree, DocumentPartitioning partitioning, double multiplier)
         {
             InitScores = null;
             if (Scores == null || Scores.Length != scores1.Scores.Length)
@@ -91,7 +92,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
             SendScoresUpdatedMessage();
         }
 
-        public virtual void AddScores(RegressionTree tree, double multiplier)
+        internal virtual void AddScores(InternalRegressionTree tree, double multiplier)
         {
             tree.AddOutputsToScores(Dataset, Scores, multiplier);
             SendScoresUpdatedMessage();
@@ -99,7 +100,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
 
         //Use faster method for score update with Partitioning
         // suitable for TrainSet
-        public virtual void AddScores(RegressionTree tree, DocumentPartitioning partitioning, double multiplier)
+        internal virtual void AddScores(InternalRegressionTree tree, DocumentPartitioning partitioning, double multiplier)
         {
             Parallel.For(0, tree.NumLeaves, new ParallelOptions { MaxDegreeOfParallelism = BlockingThreadPool.NumThreads }, (leaf) =>
             {
@@ -117,7 +118,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
     }
 
     //Accelerated gradient descent score tracker
-    public class AgdScoreTracker : ScoreTracker
+    internal class AgdScoreTracker : ScoreTracker
     {
         private int _k;
         public double[] YK;
@@ -134,7 +135,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
             throw Contracts.ExceptNotSupp("This code should not be reachable");
         }
 
-        //Computes AGD specific mutiplier. Given that we have tree number t in ensamble (we count trees starting from 0)
+        //Computes AGD specific mutiplier. Given that we have tree number t in ensemble (we count trees starting from 0)
         //And we have total k trees in ensemble, what should be the multiplier on the tree when sum the ensemble together based on AGD formula being
         //X[k+1] = Y[k] + Tree[k]
         //Y[k+1] = X[k+1] + C[k] * (X[k+1] – X[k])
@@ -158,19 +159,19 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
             else if (k == t + 1)
                 result = 1.0;
             else
-                result = TreeMultiplier(t, k - 1) + (k - 1.0 - 1.0) / (k - 1.0 + 2.0) * (TreeMultiplier(t, k - 1) - TreeMultiplier(t, k - 2)); //This is last tree beeing added X[k] = Y[k-1] + 1.0 * T[k]
+                result = TreeMultiplier(t, k - 1) + (k - 1.0 - 1.0) / (k - 1.0 + 2.0) * (TreeMultiplier(t, k - 1) - TreeMultiplier(t, k - 2)); //This is last tree being added X[k] = Y[k-1] + 1.0 * T[k]
             _treeMultiplierMap[t][k] = result;
             return result;
         }
 
-        public override void AddScores(RegressionTree tree, double multiplier)
+        internal override void AddScores(InternalRegressionTree tree, double multiplier)
         {
             _k++;
             double coeff = (_k - 1.0) / (_k + 2.0);
 
             int innerLoopSize = 1 + Dataset.NumDocs / BlockingThreadPool.NumThreads;   // +1 is to make sure we don't have a few left over at the end
             // REVIEW: This partitioning doesn't look optimal.
-            // Probably make sence to investigate better ways of splitting data?
+            // Probably make sense to investigate better ways of splitting data?
             var actions = new Action[(int)Math.Ceiling(1.0 * Dataset.NumDocs / innerLoopSize)];
             var actionIndex = 0;
             for (int d = 0; d < Dataset.NumDocs; d += innerLoopSize)
@@ -194,7 +195,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
             SendScoresUpdatedMessage();
         }
 
-        public override void AddScores(RegressionTree tree, DocumentPartitioning partitioning, double multiplier)
+        internal override void AddScores(InternalRegressionTree tree, DocumentPartitioning partitioning, double multiplier)
         {
             _k++;
             double coeff = (_k - 1.0) / (_k + 2.0);

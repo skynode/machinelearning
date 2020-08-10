@@ -5,13 +5,13 @@
 using System;
 using System.IO;
 
-namespace Microsoft.ML.Runtime.Data.IO
+namespace Microsoft.ML.Data.IO
 {
     /// <summary>
     /// A value codec encapsulates implementations capable of writing and reading data of some
     /// type to and from streams. The idea is that one creates a codec using <c>TryGetCodec</c>
     /// on the appropriate <c>ColumnType</c>, then opens multiple writers to write blocks of data
-    /// to some stream. The idea is that each writer or reader is called on some "managable chunk"
+    /// to some stream. The idea is that each writer or reader is called on some "manageable chunk"
     /// of data.
     ///
     /// Codecs should be thread safe, though the readers and writers they spawn do not need to
@@ -37,7 +37,7 @@ namespace Microsoft.ML.Runtime.Data.IO
         /// <summary>
         /// The column type for this codec.
         /// </summary>
-        ColumnType Type { get; }
+        DataViewType Type { get; }
     }
 
     /// <summary>
@@ -100,13 +100,13 @@ namespace Microsoft.ML.Runtime.Data.IO
         /// <summary>
         /// Writes a single value to the writer.
         /// </summary>
-        void Write(ref T value);
+        void Write(in T value);
 
         /// <summary>
-        /// Writes an array of values. This should be equivalent to writing each element
+        /// Writes a span of values. This should be equivalent to writing each element
         /// singly, though possibly more efficient than such a naive implementation.
         /// </summary>
-        void Write(T[] values, int index, int count);
+        void Write(ReadOnlySpan<T> values);
     }
 
     /// <summary>

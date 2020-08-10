@@ -4,10 +4,11 @@
 
 using System;
 using System.Linq;
+using Microsoft.ML.Runtime;
 
-namespace Microsoft.ML.Runtime.FastTree.Internal
+namespace Microsoft.ML.Trainers.FastTree
 {
-    public static class Algorithms
+    internal static class Algorithms
     {
         /// <summary>
         /// Returns the index of the first array position that is larger than or equal to val
@@ -122,7 +123,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
         }
 
         /// <summary>
-        /// Fidns the minimum and the argmin in an array of values
+        /// Finds the minimum and the argmin in an array of values
         /// </summary>
         public static T Min<T>(T[] array, out int argmin) where T : IComparable
         {

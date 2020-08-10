@@ -2,51 +2,40 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
-using Microsoft.ML.Runtime.Data;
-using Microsoft.ML.Runtime.Internal.Utilities;
-using Microsoft.ML.Runtime.Tools;
-using Microsoft.ML.TestFramework;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
-using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
+using Microsoft.ML.Data;
+using Microsoft.ML.Internal.Utilities;
+using Microsoft.ML.Runtime;
+using Microsoft.ML.TestFramework;
+using Microsoft.ML.TestFrameworkCommon;
+using Microsoft.ML.Tools;
 using Xunit;
 using Xunit.Abstractions;
 
-namespace Microsoft.ML.Runtime.RunTests
+namespace Microsoft.ML.RunTests
 {
     /// <summary>
     /// This is a base test class designed to support baseline comparison.
     /// </summary>
-    public abstract partial class BaseTestBaseline : BaseTestClass, IDisposable
+    public abstract partial class BaseTestBaseline : BaseTestClass
     {
-        private readonly ITestOutputHelper _output;
+        public const int DigitsOfPrecision = 7;
 
-        protected BaseTestBaseline(ITestOutputHelper helper): base(helper)
+        protected BaseTestBaseline(ITestOutputHelper output) : base(output)
         {
-            _output = helper;
-            ITest test = (ITest)helper.GetType().GetField("test", BindingFlags.NonPublic | BindingFlags.Instance).GetValue(helper); 
-            TestName = test.TestCase.TestMethod.Method.Name; 
-            Init();
-        }
-
-        void IDisposable.Dispose()
-        {
-            Cleanup();
         }
 
         internal const string RawSuffix = ".raw";
         private const string LogSuffix = ".log";
-        private readonly string _baselineRootRelPath = Path.Combine(TestDir, "BaselineOutput", BuildString); // Relative to Root.
         private readonly string _logRootRelPath = Path.Combine("Logs", BuildString); // Relative to OutDir.
-        private readonly string ScopeRootRelPath = Path.Combine("Samples", "scope"); // Root of files required for Scope related tests. Used primarily for local runs
-        private readonly string TestExtDir = Path.Combine("Tests", "Ext"); // Directory with external binaries checked in. Eg libvw.dll
 
-        private const string SamplesRootRelPath = @"Samples"; // Root location of Samples. Used primarily for local runs
         private const string TestDir = @"test";
 
         private const string DataRootRegExp = @"[a-z]:\\[^/\t ]+\\test\\data" + @"\\[^/\t ]+";
@@ -68,94 +57,136 @@ namespace Microsoft.ML.Runtime.RunTests
 #endif
 
         private const string OutputRootRegExp = @"[a-z]:\\[^/\t ]+\\TestOutput" + @"\\[^/\t ]+";
-        private static readonly string BinRegExp = @"[a-z]:\\[^\t ]+\\bin\\" + Mode;
-        private static readonly string Bin64RegExp = @"[a-z]:\\[^/\t ]+\\bin\\x64\\" + Mode;
+        private static readonly string _binRegExp = @"[a-z]:\\[^\t ]+\\bin\\" + Mode;
+        private static readonly string _bin64RegExp = @"[a-z]:\\[^/\t ]+\\bin\\x64\\" + Mode;
 
         private const string OutputRootUnixRegExp = @"\/[^\\\t ]+\/TestOutput" + @"\/[^\\\t ]+";
-        private static readonly string BinRegUnixExp = @"\/[^\\\t ]+\/bin\/" + Mode;
-        private static readonly string Bin64RegUnixExp = @"\/[^\\\t ]+\/bin\/x64\/" + Mode;
+        private static readonly string _binRegUnixExp = @"\/[^\\\t ]+\/bin\/" + Mode;
+        private static readonly string _bin64RegUnixExp = @"\/[^\\\t ]+\/bin\/x64\/" + Mode;
+        // The Regex matches both positive and negative decimal point numbers present in a string.
+        // The numbers could be a part of a word. They can also be in Exponential form eg. 3E-9 or 4E+07
+        private static readonly Regex _matchNumbers = new Regex(@"-?\b[0-9]+\.?[0-9]*(E[-+][0-9]*)?\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
         /// <summary>
         /// When the progress log is appended to the end of output (in test runs), this line precedes the progress log.
         /// </summary>
         protected const string ProgressLogLine = "--- Progress log ---";
 
-        private static readonly char[] _seperators = { '\t', ' ', '=', '%', '(', ')' };
-
-        // Full paths to the directories.
-        private string _baseDir;
+        // Full paths to the baseline directories.
+        private string _baselineCommonDir;
+        private IEnumerable<string> _baselineConfigDirs;
+        private string _usedSpecificBaselineConfig;
 
         // The writer to write to test log files.
+        protected TestLogger TestLogger;
         protected StreamWriter LogWriter;
-        protected TlcEnvironment Env;
+        private protected ConsoleEnvironment _env;
+        protected IHostEnvironment Env => _env;
+        protected MLContext ML;
         private bool _normal;
-        private bool _passed;
+        private int _failures = 0;
 
-        public string TestName { get; set; }
-
-        public void Init()
+        protected override void Initialize()
         {
+            base.Initialize();
+
             // Create the output and log directories.
-            Contracts.Check(Directory.Exists(Path.Combine(RootDir, TestDir, "BaselineOutput")));
+            string baselineRootDir = Path.Combine(RootDir, TestDir, "BaselineOutput");
+            Contracts.Check(Directory.Exists(baselineRootDir));
+
+            _baselineCommonDir = Path.Combine(baselineRootDir, "Common");
+            _baselineConfigDirs = GetConfigurationDirs();
+
             string logDir = Path.Combine(OutDir, _logRootRelPath);
             Directory.CreateDirectory(logDir);
 
-            // Find the sample data and baselines.
-            _baseDir = Path.Combine(RootDir, _baselineRootRelPath);
-
-            string logPath = Path.Combine(logDir, TestName + LogSuffix);
+            string logPath = Path.Combine(logDir, FullTestName + LogSuffix);
             LogWriter = OpenWriter(logPath);
-            _passed = true;
-            Env = new TlcEnvironment(42, outWriter: LogWriter, errWriter: LogWriter);
-            InitializeCore();
+
+            TestLogger = new TestLogger(Output);
+            _env = new ConsoleEnvironment(42, outWriter: LogWriter, errWriter: LogWriter, testWriter: TestLogger)
+                .AddStandardComponents();
+            ML = new MLContext(42);
+            ML.Log += LogTestOutput;
+            ML.AddStandardComponents();
         }
 
-        public void Cleanup()
+        private IEnumerable<string> GetConfigurationDirs()
         {
-            // REVIEW: Is there a way to determine whether the test completed normally?
-            // Requiring tests to call Done() is hokey.
+            // Sometimes different configuration will have combination.
+            // for example: one test can run on windows, have different result both
+            // on x64 vs x86 and dotnet core 3.1 vs others, so we have 4 combination:
+            // x64-netcore3.1, x86-netcore3.1, x64-rest, x86-rest. In some cases x64 vs x86
+            // have different results, in some cases netcore 3.1 vs rest have different results,
+            // the most complicate situation is 12 combinations (x64 vs x86, netcoreapp3.1 vs rest,
+            // win vs linux vs osx) have different results.
+            // So use list of string to return different configurations and test will try to search
+            // through this list and use the one file first found, make sure we don't have baseline file
+            // at different configuration folders.
+            var configurationDirs = new List<string>();
 
-            CleanupCore();
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+                configurationDirs.Add("osx-x64");
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+                configurationDirs.Add("linux-x64");
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                if (Environment.Is64BitProcess)
+                    configurationDirs.Add("win-x64");
+                else
+                    configurationDirs.Add("win-x86");
+
+            // Use netcore 3.1 result file if necessary.
+            // The small difference comes from CPUMath using different instruction set:
+            // 1. net framework and net core 2.1 uses CpuMathUtils.netstandard that uses SSE instruction set;
+            // 2. net core 3.1 uses CpuMathUtils.netcoreapp that uses AVX, SSE or direct floating point calculation
+            // depending on hardward avaibility.
+            // AVX and SSE generates slightly different result due to nature of floating point math.
+            // So Ideally we should adding AVX support at CPUMath native library, 
+            // use below issue to track: https://github.com/dotnet/machinelearning/issues/5044
+            // don't need netcoreapp21 as this is the default case
+            if (AppDomain.CurrentDomain.GetData("FX_PRODUCT_VERSION") != null)
+                configurationDirs.Add("netcoreapp31");
+
+            return configurationDirs;
+        }
+
+        private void LogTestOutput(object sender, LoggingEventArgs e)
+        {
+            if (e.Kind >= MessageKindToLog)
+                Output.WriteLine(e.Message);
+        }
+
+        // This method is used by subclass to dispose of disposable objects
+        // such as LocalEnvironment.
+        // It is called as a first step in test clean up.
+        protected override void Cleanup()
+        {
+            _env = null;
+
             Contracts.Assert(IsActive);
             Log("Test {0}: {1}: {2}", TestName,
                 _normal ? "completed normally" : "aborted",
-                _passed ? "passed" : "failed");
+                IsPassing ? "passed" : "failed");
+
+            if (_usedSpecificBaselineConfig != null)
+            {
+                Log(String.Format("Test {0} is using {1} configuration specific baselines.",
+                    TestName, _usedSpecificBaselineConfig));
+            }
+
+            if (!_normal)
+                Assert.Equal(0, _failures);
 
             Contracts.AssertValue(LogWriter);
             LogWriter.Dispose();
             LogWriter = null;
-        }
 
-        protected virtual void InitializeCore()
-        {
-        }
-
-        // This method is used by subclass to dispose of disposable objects
-        // such as TlcEnvironment.
-        // It is called as a first step in test clean up.
-        protected virtual void CleanupCore()
-        {
-            if (Env != null)
-                Env.Dispose();
-            Env = null;
+            base.Cleanup();
         }
 
         protected bool IsActive { get { return LogWriter != null; } }
 
-        protected bool IsPassing { get { return _passed; } }
-
-        // Return the location of the local Samples folder
-        // Used primarily for local Scope runs
-        protected string SamplesDir { get { return Path.Combine(RootDir, SamplesRootRelPath); } }
-
-        // Return the location of the local scope folder under Samples. Used primarily 
-        // by Scope scripts and for Scope tests
-        protected string ScopeSamplesDir { get { return Path.Combine(RootDir, ScopeRootRelPath); } }
-
-        // Return the local of the directory where external binaries for test purposes are located
-        protected string ExternalTestBinariesDir { get { return Path.Combine(RootDir, TestExtDir); } }
-
-        protected string TestDirectory { get { return Path.Combine(RootDir, TestDir); } }
+        protected bool IsPassing { get { return _failures == 0; } }
 
         // Called by a test to signal normal completion. If this is not called before the
         // TestScope is disposed, we assume the test was aborted.
@@ -165,7 +196,7 @@ namespace Microsoft.ML.Runtime.RunTests
             Contracts.Assert(!_normal, "Done() should only be called once!");
             _normal = true;
 
-            Assert.True(_passed);
+            Assert.Equal(0, _failures);
         }
 
         protected bool Check(bool f, string msg)
@@ -182,23 +213,19 @@ namespace Microsoft.ML.Runtime.RunTests
             return f;
         }
 
-        protected void Fail(string msg)
-        {
-            Fail(false, msg);
-        }
-
         protected void Fail(string fmt, params object[] args)
         {
-            Fail(false, fmt, args);
-        }
-
-        protected void Fail(bool relax, string fmt, params object[] args)
-        {
             Contracts.Assert(IsActive);
-            if (!relax)
-                _passed = false;
+            _failures++;
+            Log($"*** Failure #{_failures}: " + fmt, args);
 
-            Log("*** Failure: " + fmt, args);
+            var stackTrace = new StackTrace(true);
+            for (int i = 0; i < stackTrace.FrameCount; i++)
+            {
+                var frame = stackTrace.GetFrame(i);
+                Log($"\t\t{frame.GetMethod()} {frame.GetFileName()} {frame.GetFileLineNumber()}");
+            }
+
         }
 
         protected void Log(string msg)
@@ -206,7 +233,7 @@ namespace Microsoft.ML.Runtime.RunTests
             Contracts.Assert(IsActive);
             Contracts.AssertValue(LogWriter);
             LogWriter.WriteLine(msg);
-            _output.WriteLine(msg);
+            Output.WriteLine(msg);
         }
 
         protected void Log(string fmt, params object[] args)
@@ -214,25 +241,7 @@ namespace Microsoft.ML.Runtime.RunTests
             Contracts.Assert(IsActive);
             Contracts.AssertValue(LogWriter);
             LogWriter.WriteLine(fmt, args);
-            _output.WriteLine(fmt, args);
-        }
-
-        protected string GetBaselineDir(string subDir)
-        {
-            Contracts.Assert(IsActive);
-            if (string.IsNullOrWhiteSpace(subDir))
-                return null;
-            return Path.GetFullPath(Path.Combine(_baseDir, subDir));
-            //return Path.Combine(_baseDir, subDir);
-        }
-
-        protected string GetBaselinePath(string subDir, string name)
-        {
-            Contracts.Assert(IsActive);
-            if (string.IsNullOrWhiteSpace(subDir))
-                return GetBaselinePath(name);
-            return Path.GetFullPath(Path.Combine(_baseDir, subDir, name));
-            //return Path.Combine(_baseDir, subDir, name);
+            Output.WriteLine(fmt, args);
         }
 
         protected string GetBaselinePath(string name)
@@ -240,14 +249,30 @@ namespace Microsoft.ML.Runtime.RunTests
             Contracts.Assert(IsActive);
             if (string.IsNullOrWhiteSpace(name))
                 return null;
-            //return Path.Combine(_baseDir, name);
-            return Path.GetFullPath(Path.Combine(_baseDir, name));
+
+            return GetBaselinePath(string.Empty, name);
         }
 
-        // Inverts the _passed flag. Do not ever use this except in rare conditions. Eg. Recording failure of a test as a success.
-        protected void DoNotEverUseInvertPass()
+        protected string GetBaselinePath(string subDir, string name)
         {
-            _passed = !_passed;
+            Contracts.Assert(IsActive);
+            subDir = subDir ?? string.Empty;
+
+            string baselinePath;
+
+            // first check if a platform specific baseline exists
+            foreach (var baselineConfigDir in _baselineConfigDirs)
+            {
+                baselinePath = Path.GetFullPath(Path.Combine(_baselineCommonDir, subDir, baselineConfigDir, name));
+                if (File.Exists(baselinePath))
+                {
+                    _usedSpecificBaselineConfig = baselineConfigDir;
+                    return baselinePath;
+                }
+            }
+
+            // Platform specific baseline does not exist, use Common baseline
+            return Path.GetFullPath(Path.Combine(_baselineCommonDir, subDir, name));
         }
 
         // These are used to normalize output.
@@ -270,6 +295,7 @@ namespace Microsoft.ML.Runtime.RunTests
         private static readonly Regex _matchTime = new Regex(@"[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?", RegexOptions.Compiled);
         private static readonly Regex _matchShortTime = new Regex(@"\([0-9]{2}:[0-9]{2}(\.[0-9]+)?\)", RegexOptions.Compiled);
         private static readonly Regex _matchMemory = new Regex(@"memory usage\(MB\): [0-9]+", RegexOptions.Compiled);
+        private static readonly Regex _matchReservedMemory = new Regex(@": [0-9]+ bytes", RegexOptions.Compiled);
         private static readonly Regex _matchElapsed = new Regex(@"Time elapsed\(s\): [0-9.]+", RegexOptions.Compiled);
         private static readonly Regex _matchTimes = new Regex(@"Instances caching time\(s\): [0-9\.]+", RegexOptions.Compiled);
         private static readonly Regex _matchUpdatesPerSec = new Regex(@", ([0-9\.]+|Infinity)M WeightUpdates/sec", RegexOptions.Compiled);
@@ -277,10 +303,10 @@ namespace Microsoft.ML.Runtime.RunTests
         private static readonly Regex _matchInfinity = new Regex(@"\u221E", RegexOptions.Compiled);
         private static readonly Regex _matchErrorLog = new Regex(@"Error_[\w-]+\.log", RegexOptions.Compiled);
         private static readonly Regex _matchGuid = new Regex(@"[A-F0-9]{8}(?:-[A-F0-9]{4}){3}-[A-F0-9]{12}", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-        private static readonly Regex _matchBin = new Regex(BinRegExp, RegexOptions.IgnoreCase | RegexOptions.Compiled);
-        private static readonly Regex _matchUnixBin = new Regex(BinRegUnixExp, RegexOptions.IgnoreCase | RegexOptions.Compiled);
-        private static readonly Regex _matchBin64 = new Regex(Bin64RegExp, RegexOptions.IgnoreCase | RegexOptions.Compiled);
-        private static readonly Regex _matchUnixBin64 = new Regex(Bin64RegUnixExp, RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        private static readonly Regex _matchBin = new Regex(_binRegExp, RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        private static readonly Regex _matchUnixBin = new Regex(_binRegUnixExp, RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        private static readonly Regex _matchBin64 = new Regex(_bin64RegExp, RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        private static readonly Regex _matchUnixBin64 = new Regex(_bin64RegUnixExp, RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
         protected void Normalize(string path)
         {
@@ -296,13 +322,13 @@ namespace Microsoft.ML.Runtime.RunTests
                 {
                     line = _matchDataRoot.Replace(line, "%Data%");
                     line = _matchDataUnixRoot.Replace(line, "%Data%");
+                    line = _matchOutputRoot.Replace(line, "%Output%");
+                    line = _matchOutputUnixRoot.Replace(line, "%Output%");
                     line = _matchSamplesRoot.Replace(line, "%Samples%\\");
                     line = _matchSamplesUnixRoot.Replace(line, "%Samples%\\");
                     line = _matchSourceRoot.Replace(line, "%Source%\\");
                     line = _matchSourceUnixRoot.Replace(line, "%Source%\\");
                     line = _matchTestsRoot.Replace(line, "%Tests%\\");
-                    line = _matchOutputRoot.Replace(line, "%Output%");
-                    line = _matchOutputUnixRoot.Replace(line, "%Output%");
                     line = _matchBin.Replace(line, "%Bin%\\");
                     line = _matchUnixBin.Replace(line, "%Bin%\\");
                     line = _matchBin64.Replace(line, "%Bin%\\");
@@ -318,6 +344,7 @@ namespace Microsoft.ML.Runtime.RunTests
                     line = _matchShortTime.Replace(line, "(%Time%)");
                     line = _matchElapsed.Replace(line, "Time elapsed(s): %Number%");
                     line = _matchMemory.Replace(line, "memory usage(MB): %Number%");
+                    line = _matchReservedMemory.Replace(line, ": %Number% bytes");
                     line = _matchTimes.Replace(line, "Instances caching time(s): %Number%");
                     line = _matchUpdatesPerSec.Replace(line, ", %Number%M WeightUpdates/sec");
                     line = _matchParameterT.Replace(line, "=PARAM:/t:%Number%");
@@ -329,54 +356,27 @@ namespace Microsoft.ML.Runtime.RunTests
             }
         }
 
-        // Set and restored by instances of MismatchContext. When this is true, baseline differences
-        // are tolerated. They are still reported in the test log, but do not cause a test failure.
-        // REVIEW: Perhaps they should cause the test to be inconclusive instead of pass?
-        private bool _allowMismatch;
-
-        /// <summary>
-        /// When hardware dependent baseline values should be tolerated, scope the code
-        /// that does the comparisons with an instance of this disposable struct.
-        /// </summary>
-        protected struct MismatchContext : IDisposable
-        {
-            // The test class instance.
-            private readonly BaseTestBaseline _host;
-            // Dispose restores this value to the _allowMismatch field of _host.
-            private readonly bool _allowMismatch;
-
-            public MismatchContext(BaseTestBaseline host)
-            {
-                _host = host;
-                _allowMismatch = _host._allowMismatch;
-                _host._allowMismatch = true;
-            }
-
-            public void Dispose()
-            {
-                Contracts.Assert(_host._allowMismatch);
-                _host._allowMismatch = _allowMismatch;
-            }
-        }
-
         /// <summary>
         /// Compare the contents of an output file with its baseline.
         /// </summary>
-        protected bool CheckEquality(string dir, string name, string nameBase = null)
+        protected bool CheckEquality(string dir, string name, string nameBase = null,
+            int digitsOfPrecision = DigitsOfPrecision, NumberParseOption parseOption = NumberParseOption.Default)
         {
-            return CheckEqualityCore(dir, name, nameBase ?? name, false);
+            return CheckEqualityCore(dir, name, nameBase ?? name, false, digitsOfPrecision, parseOption);
         }
 
         /// <summary>
         /// Check whether two files are same ignoring volatile differences (path, dates, times, etc).
         /// Returns true if the check passes.
         /// </summary>
-        protected bool CheckEqualityNormalized(string dir, string name, string nameBase = null)
+        protected bool CheckEqualityNormalized(string dir, string name, string nameBase = null,
+            int digitsOfPrecision = DigitsOfPrecision, NumberParseOption parseOption = NumberParseOption.Default)
         {
-            return CheckEqualityCore(dir, name, nameBase ?? name, true);
+            return CheckEqualityCore(dir, name, nameBase ?? name, true, digitsOfPrecision, parseOption);
         }
 
-        protected bool CheckEqualityCore(string dir, string name, string nameBase, bool normalize)
+        protected bool CheckEqualityCore(string dir, string name, string nameBase, bool normalize,
+            int digitsOfPrecision = DigitsOfPrecision, NumberParseOption parseOption = NumberParseOption.Default)
         {
             Contracts.Assert(IsActive);
             Contracts.AssertValue(dir); // Can be empty.
@@ -403,40 +403,11 @@ namespace Microsoft.ML.Runtime.RunTests
             if (!CheckBaseFile(basePath))
                 return false;
 
-            bool res = CheckEqualityFromPathsCore(relPath, basePath, outPath);
+
+            bool res = CheckEqualityFromPathsCore(relPath, basePath, outPath, digitsOfPrecision: digitsOfPrecision, parseOption: parseOption);
 
             // No need to keep the raw (unnormalized) output file.
             if (normalize && res)
-                File.Delete(outPath + RawSuffix);
-
-            return res;
-        }
-
-        /// <summary>
-        /// Check whether two files are same ignoring volatile differences (path, dates, times, etc),
-        /// skipping the given number of lines on the output, and finding the corresponding line
-        /// in the baseline.
-        /// </summary>
-        protected bool CheckEqualityNormalizedFromPaths(string desc, string basePath, string outPath, int skip = 0)
-        {
-            Contracts.Assert(IsActive);
-            Contracts.AssertNonEmpty(basePath);
-            Contracts.AssertNonEmpty(outPath);
-            Contracts.Assert(skip >= 0);
-
-            if (!CheckOutFile(outPath))
-                return false;
-
-            // Normalize the output file.
-            Normalize(outPath);
-
-            if (!CheckBaseFile(basePath))
-                return false;
-
-            bool res = CheckEqualityFromPathsCore(desc, basePath, outPath, skip);
-
-            // No need to keep the raw (unnormalized) output file.
-            if (res)
                 File.Delete(outPath + RawSuffix);
 
             return res;
@@ -483,11 +454,6 @@ namespace Microsoft.ML.Runtime.RunTests
             return true;
         }
 
-        private IEnumerator<string> LineEnumerator(TextReader reader)
-        {
-            return LineEnumerator(reader, x => false);
-        }
-
         private IEnumerator<string> LineEnumerator(TextReader reader, Func<string, bool> stop)
         {
             string result;
@@ -515,44 +481,12 @@ namespace Microsoft.ML.Runtime.RunTests
             }
         }
 
-        /// <summary>
-        /// Check whether two files are same ignoring volatile differences (path, dates, times, etc),
-        /// skipping the given number of lines on the output, and finding the corresponding line
-        /// in the baseline.
-        /// </summary>
-        protected bool CheckEqualityNormalized(string dir, string name, string suffix, int skip)
-        {
-            Contracts.Assert(IsActive);
-            Contracts.AssertValue(dir); // Can be empty.
-            Contracts.AssertNonEmpty(name);
-            Contracts.AssertNonEmpty(suffix);
-            Contracts.Assert(skip >= 0);
-
-            string relPath = Path.Combine(dir, name + suffix);
-            string basePath = GetBaselinePath(dir, name);
-            string outPath = GetOutputPath(dir, name + suffix);
-
-            if (!CheckOutFile(outPath))
-                return false;
-
-            // Normalize the output file.
-            Normalize(outPath);
-
-            if (!CheckBaseFile(basePath))
-                return false;
-
-            bool res = CheckEqualityFromPathsCore(relPath, basePath, outPath, skip);
-
-            // No need to keep the raw (unnormalized) output file.
-            if (res)
-                File.Delete(outPath + RawSuffix);
-
-            return res;
-        }
-
-        protected bool CheckEqualityFromPathsCore(string relPath, string basePath, string outPath, int skip = 0, decimal precision = 10000000)
+        protected bool CheckEqualityFromPathsCore(string relPath, string basePath, string outPath, int skip = 0,
+            int digitsOfPrecision = DigitsOfPrecision, NumberParseOption parseOption = NumberParseOption.Default)
         {
             Contracts.Assert(skip >= 0);
+
+            Output.WriteLine($"Comparing {outPath} and {basePath}");
 
             using (StreamReader baseline = OpenReader(basePath))
             using (StreamReader result = OpenReader(outPath))
@@ -597,42 +531,262 @@ namespace Microsoft.ML.Runtime.RunTests
                     }
 
                     count++;
+                    var inRange = GetNumbersFromFile(ref line1, ref line2, digitsOfPrecision, parseOption);
 
-                    if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-                        GetNumbersFromFile(ref line1, ref line2, precision);
+                    var line1Core = line1.Replace(" ", "").Replace("\t", "");
+                    var line2Core = line2.Replace(" ", "").Replace("\t", "");
 
-                    if (line1 != line2)
+                    if (!inRange || line1Core != line2Core)
                     {
                         if (line1 == null || line2 == null)
                             Fail("Output and baseline different lengths: '{0}'", relPath);
                         else
-                            Fail(_allowMismatch, "Output and baseline mismatch at line {1}: '{0}'", relPath, count);
+                            Fail("Output and baseline mismatch at line {1}, expected '{2}' but got '{3}' : '{0}'", relPath, count, line1, line2);
                         return false;
                     }
                 }
             }
         }
 
-        private static void GetNumbersFromFile(ref string firstString, ref string secondString, decimal precision)
+        private bool GetNumbersFromFile(ref string firstString, ref string secondString,
+            int digitsOfPrecision, NumberParseOption parseOption)
         {
-            Regex _matchNumer = new Regex(@"\b[0-9]+\.?[0-9]*\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-            MatchCollection firstCollection = _matchNumer.Matches(firstString);
-            MatchCollection secondCollection = _matchNumer.Matches(secondString);
+            MatchCollection firstCollection = _matchNumbers.Matches(firstString);
+            MatchCollection secondCollection = _matchNumbers.Matches(secondString);
 
-            MatchNumberWithTolerance(firstCollection, secondCollection, precision);
-            firstString = _matchNumer.Replace(firstString, "%Number%");
-            secondString = _matchNumer.Replace(secondString, "%Number%");
+            if (firstCollection.Count == secondCollection.Count)
+            {
+                if (!MatchNumberWithTolerance(firstCollection, secondCollection, digitsOfPrecision, parseOption))
+                {
+                    return false;
+                }
+            }
+
+            firstString = _matchNumbers.Replace(firstString, "%Number%");
+            secondString = _matchNumbers.Replace(secondString, "%Number%");
+            return true;
         }
 
-        private static void MatchNumberWithTolerance(MatchCollection firstCollection, MatchCollection secondCollection, decimal precision)
+        private bool MatchNumberWithTolerance(MatchCollection firstCollection, MatchCollection secondCollection,
+            int digitsOfPrecision, NumberParseOption parseOption)
         {
-            for (int i = 0; i < firstCollection.Count; i++)
+            if (parseOption == NumberParseOption.UseSingle)
             {
-                decimal f1 = decimal.Parse(firstCollection[i].ToString());
-                decimal f2 = decimal.Parse(secondCollection[i].ToString());
+                for (int i = 0; i < firstCollection.Count; i++)
+                {
+                    float f1 = float.Parse(firstCollection[i].ToString());
+                    float f2 = float.Parse(secondCollection[i].ToString());
 
-                Assert.InRange(f1, f2 - (f2 / precision), f2 + (f2 / precision));
+                    if (!CompareNumbersWithTolerance(f1, f2, i, digitsOfPrecision))
+                    {
+                        return false;
+                    }
+                }
             }
+            else if (parseOption == NumberParseOption.UseDouble)
+            {
+                for (int i = 0; i < firstCollection.Count; i++)
+                {
+                    double f1 = double.Parse(firstCollection[i].ToString());
+                    double f2 = double.Parse(secondCollection[i].ToString());
+
+                    if (!CompareNumbersWithTolerance(f1, f2, i, digitsOfPrecision))
+                    {
+                        return false;
+                    }
+                }
+            }
+            else
+            {
+                throw new ArgumentException($"Invalid {nameof(NumberParseOption)}", nameof(parseOption));
+            }
+
+            return true;
+        }
+
+        public bool CompareNumbersWithTolerance(double expected, double actual, int? iterationOnCollection = null, 
+            int digitsOfPrecision = DigitsOfPrecision, bool logFailure = true)
+        {
+            if (double.IsNaN(expected) && double.IsNaN(actual))
+                return true;
+
+            // this follows the IEEE recommendations for how to compare floating point numbers
+            double allowedVariance = Math.Pow(10, -digitsOfPrecision);
+            double delta = Round(expected, digitsOfPrecision) - Round(actual, digitsOfPrecision);
+            // limitting to the digits we care about. 
+            delta = Math.Round(delta, digitsOfPrecision);
+
+            bool inRange = delta >= -allowedVariance && delta <= allowedVariance;
+
+            // for some cases, rounding up is not beneficial
+            // so checking on whether the difference is significant prior to rounding, and failing only then. 
+            // example, for 5 digits of precision. 
+            // F1 = 1.82844949 Rounds to 1.8284
+            // F2 = 1.8284502  Rounds to 1.8285
+            // would fail the inRange == true check, but would suceed the following, and we doconsider those two numbers 
+            // (1.82844949 - 1.8284502) = -0.00000071
+
+            double delta2 = 0;
+            if (!inRange)
+            {
+                delta2 = Math.Round(expected - actual, digitsOfPrecision);
+                inRange = delta2 >= -allowedVariance && delta2 <= allowedVariance;
+            }
+
+            if (!inRange)
+            {
+                var message = iterationOnCollection != null ? "" : $"Output and baseline mismatch at line {iterationOnCollection}." + Environment.NewLine;
+
+                if(logFailure)
+                    Fail(message +
+                            $"Values to compare are {expected} and {actual}" + Environment.NewLine +
+                            $"\t AllowedVariance: {allowedVariance}" + Environment.NewLine +
+                            $"\t delta: {delta}" + Environment.NewLine +
+                            $"\t delta2: {delta2}" + Environment.NewLine);
+            }
+
+            return inRange;
+        }
+
+        private static double Round(double value, int digitsOfPrecision)
+        {
+            if ((value == 0) || double.IsInfinity(value) || double.IsNaN(value))
+            {
+                return value;
+            }
+
+            double absValue = Math.Abs(value);
+            double integralDigitCount = Math.Floor(Math.Log10(absValue) + 1);
+
+            double scale = Math.Pow(10, integralDigitCount);
+            return scale * Math.Round(value / scale, digitsOfPrecision);
+        }
+
+        /// <summary>
+        /// Takes in 2 IDataViews and compares the specified column. 
+        /// </summary>
+        /// <param name="leftColumnName">The name of the left column to compare.</param>
+        /// <param name="rightColumnName">The name of the right column to compare.</param>
+        /// <param name="left">The left IDataView.</param>
+        /// <param name="right">The right IDataView</param>
+        /// <param name="precision">How many digits of precision to use for comparison. Defaults to 6 and only applies to floating point numbers.</param>
+        /// <param name="isRightColumnOnnxScalar">If the right IDataView is from ONNX. ONNX return values as a VBuffer always, so this lets that case be handled.</param>
+        public void CompareResults(string leftColumnName, string rightColumnName, IDataView left, IDataView right, int precision = 6, bool isRightColumnOnnxScalar = false)
+        {
+            var leftColumn = left.Schema[leftColumnName];
+            var rightColumn = right.Schema[rightColumnName];
+            var leftType = leftColumn.Type.GetItemType();
+            var rightType = rightColumn.Type.GetItemType();
+
+            if (leftType == NumberDataViewType.SByte)
+                CompareSelectedColumns<sbyte>(leftColumnName, rightColumnName, left, right, isRightColumnOnnxScalar: isRightColumnOnnxScalar);
+            else if (leftType == NumberDataViewType.Byte)
+                CompareSelectedColumns<byte>(leftColumnName, rightColumnName, left, right, isRightColumnOnnxScalar: isRightColumnOnnxScalar);
+            else if (leftType == NumberDataViewType.Int16)
+                CompareSelectedColumns<short>(leftColumnName, rightColumnName, left, right, isRightColumnOnnxScalar: isRightColumnOnnxScalar);
+            else if (leftType == NumberDataViewType.UInt16)
+                CompareSelectedColumns<ushort>(leftColumnName, rightColumnName, left, right, isRightColumnOnnxScalar: isRightColumnOnnxScalar);
+            else if (leftType == NumberDataViewType.Int32)
+                CompareSelectedColumns<int>(leftColumnName, rightColumnName, left, right, isRightColumnOnnxScalar: isRightColumnOnnxScalar);
+            else if (leftType == NumberDataViewType.UInt32)
+                CompareSelectedColumns<uint>(leftColumnName, rightColumnName, left, right, isRightColumnOnnxScalar: isRightColumnOnnxScalar);
+            else if (leftType == NumberDataViewType.Int64)
+                CompareSelectedColumns<long>(leftColumnName, rightColumnName, left, right, isRightColumnOnnxScalar: isRightColumnOnnxScalar);
+            else if (leftType == NumberDataViewType.UInt64)
+                CompareSelectedColumns<ulong>(leftColumnName, rightColumnName, left, right, isRightColumnOnnxScalar: isRightColumnOnnxScalar);
+            else if (leftType == NumberDataViewType.Single)
+                CompareSelectedColumns<float>(leftColumnName, rightColumnName, left, right, precision, isRightColumnOnnxScalar: isRightColumnOnnxScalar);
+            else if (leftType == NumberDataViewType.Double)
+                CompareSelectedColumns<double>(leftColumnName, rightColumnName, left, right, precision, isRightColumnOnnxScalar: isRightColumnOnnxScalar);
+            else if (leftType == BooleanDataViewType.Instance)
+                CompareSelectedColumns<bool>(leftColumnName, rightColumnName, left, right, isRightColumnOnnxScalar: isRightColumnOnnxScalar);
+            else if (leftType == TextDataViewType.Instance)
+                CompareSelectedColumns<ReadOnlyMemory<char>>(leftColumnName, rightColumnName, left, right, isRightColumnOnnxScalar: isRightColumnOnnxScalar);
+        }
+
+        private void CompareSelectedColumns<T>(string leftColumnName, string rightColumnName, IDataView left, IDataView right, int precision = 6, bool isRightColumnOnnxScalar = false)
+        {
+            var leftColumn = left.Schema[leftColumnName];
+            var rightColumn = right.Schema[rightColumnName];
+
+            using (var expectedCursor = left.GetRowCursor(leftColumn))
+            using (var actualCursor = right.GetRowCursor(rightColumn))
+            {
+                T expectedScalar = default;
+                VBuffer<T> expectedVector = default;
+
+                ValueGetter<T> expectedScalarGetter = default;
+                ValueGetter<VBuffer<T>> expectedVectorGetter = default;
+
+                ValueGetter<T> actualScalarGetter = default;
+                ValueGetter<VBuffer<T>> actualVectorGetter = default;
+
+                VBuffer<T> actualVector = default;
+                T actualScalar = default;
+
+                // Assuming both columns are of the same type.
+                if (leftColumn.Type is VectorDataViewType)
+                {
+                    expectedVectorGetter = expectedCursor.GetGetter<VBuffer<T>>(leftColumn);
+                    actualVectorGetter = actualCursor.GetGetter<VBuffer<T>>(rightColumn);
+                }
+                else
+                {
+                    expectedScalarGetter = expectedCursor.GetGetter<T>(leftColumn);
+
+                    // If the right column is from onxx it will still be a VBuffer, just has a length of 1.
+                    if (isRightColumnOnnxScalar)
+                        actualVectorGetter = actualCursor.GetGetter<VBuffer<T>>(rightColumn);
+                    else
+                        actualScalarGetter = actualCursor.GetGetter<T>(rightColumn);
+                }
+
+                while (expectedCursor.MoveNext() && actualCursor.MoveNext())
+                {
+
+                    if (leftColumn.Type is VectorDataViewType)
+                    {
+                        expectedVectorGetter(ref expectedVector);
+                        actualVectorGetter(ref actualVector);
+                        Assert.Equal(expectedVector.Length, actualVector.Length);
+
+                        for (int i = 0; i < expectedVector.Length; ++i)
+                            CompareScalarValues<T>(expectedVector.GetItemOrDefault(i), actualVector.GetItemOrDefault(i), precision);
+                    }
+                    else
+                    {
+                        expectedScalarGetter(ref expectedScalar);
+
+                        // If the right column is from onxx get a VBuffer instead and just use the first value.
+                        if (isRightColumnOnnxScalar)
+                        {
+                            actualVectorGetter(ref actualVector);
+                            actualScalar = actualVector.GetItemOrDefault(0);
+                        }
+                        else
+                        {
+                            actualScalarGetter(ref actualScalar);
+                        }
+
+                        CompareScalarValues<T>(expectedScalar, actualScalar, precision);
+                    }
+                }
+            }
+        }
+
+        private void CompareScalarValues<T>(T expected, T actual, int precision)
+        {
+            if (typeof(T) == typeof(ReadOnlyMemory<Char>))
+                Assert.Equal(expected.ToString(), actual.ToString());
+            else if (typeof(T) == typeof(double))
+                Assert.Equal(Convert.ToDouble(expected), Convert.ToDouble(actual), precision);
+            else if (typeof(T) == typeof(float))
+                // We are using float values. But the Assert.Equal function takes doubles.
+                // And sometimes the converted doubles are different in their precision.
+                // So make sure we compare floats
+                CompareNumbersWithTolerance(Convert.ToSingle(expected), Convert.ToSingle(actual), null, precision);
+            else
+                Assert.Equal(expected, actual);
         }
 
 #if TOLERANCE_ENABLED
@@ -789,7 +943,7 @@ namespace Microsoft.ML.Runtime.RunTests
         public void RunMTAThread(ThreadStart fn)
         {
             Exception inner = null;
-            Thread t = Utils.CreateBackgroundThread(() =>
+            var t = new Thread(() =>
             {
                 try
                 {
@@ -801,9 +955,7 @@ namespace Microsoft.ML.Runtime.RunTests
                     Fail("The test threw an exception - {0}", e);
                 }
             });
-#if !CORECLR // CoreCLR does not support apartment state settings for threads.
-            t.SetApartmentState(ApartmentState.MTA);
-#endif
+            t.IsBackground = true;
             t.Start();
             t.Join();
             if (inner != null)
@@ -826,11 +978,8 @@ namespace Microsoft.ML.Runtime.RunTests
         protected static StreamWriter OpenWriter(string path, bool append = false, Encoding encoding = null, int bufferSize = 1024)
         {
             Contracts.CheckNonWhiteSpace(path, nameof(path));
-#if CORECLR
+
             return Utils.OpenWriter(File.Open(path, append ? FileMode.Append : FileMode.OpenOrCreate), encoding, bufferSize, false);
-#else
-            return new StreamWriter(path, append);
-#endif
         }
 
         /// <summary>
@@ -841,11 +990,8 @@ namespace Microsoft.ML.Runtime.RunTests
         protected static StreamReader OpenReader(string path)
         {
             Contracts.CheckNonWhiteSpace(path, nameof(path));
-#if CORECLR
-            return new StreamReader(File.Open(path, FileMode.Open, FileAccess.Read));
-#else
-            return new StreamReader(path);
-#endif
+
+            return new StreamReader(File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read));
         }
 
         /// <summary>
@@ -853,23 +999,16 @@ namespace Microsoft.ML.Runtime.RunTests
         /// This method is used in unit tests when the output is not baselined.
         /// If the output is to be baselined and compared, the other overload should be used.
         /// </summary>
-        protected static int MainForTest(string args)
+        protected int MainForTest(string args)
         {
-            using (var env = new TlcEnvironment())
-            {
-                int result = Maml.MainCore(env, args, false);
-                return result;
-            }
+            return Maml.MainCore(ML, args, false);
         }
 
-        protected static string GetEnvironmentVariable(string name)
+        public enum NumberParseOption
         {
-            return Environment.GetEnvironmentVariable(name, EnvironmentVariableTarget.Process);
-        }
-
-        protected static void SetEnvironmentVariable(string name, string value)
-        {
-            Environment.SetEnvironmentVariable(name, value, EnvironmentVariableTarget.Process);
+            Default = UseDouble,
+            UseSingle = 1,
+            UseDouble = 2,
         }
     }
 

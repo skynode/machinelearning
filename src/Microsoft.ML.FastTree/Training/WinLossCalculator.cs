@@ -6,11 +6,11 @@ using System;
 using System.Collections.Concurrent;
 using System.Linq;
 using System.Threading.Tasks;
-using Microsoft.ML.Runtime.Internal.Utilities;
+using Microsoft.ML.Internal.Utilities;
 
-namespace Microsoft.ML.Runtime.FastTree.Internal
+namespace Microsoft.ML.Trainers.FastTree
 {
-    public sealed class WinLossCalculator
+    internal sealed class WinLossCalculator
     {
         private readonly int[] _oneTwoThree;
 
@@ -49,7 +49,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
 
             int chunkSize = 1 + dataset.NumQueries / BlockingThreadPool.NumThreads;   // Minimizes the number of repeat computations in sparse array to have each thread take as big a chunk as possible
             // REVIEW: This partitioning doesn't look optimal.
-            // Probably make sence to investigate better ways of splitting data?
+            // Probably make sense to investigate better ways of splitting data?
             var actions = new Action[(int)Math.Ceiling(1.0 * dataset.NumQueries / chunkSize)];
             var actionIndex = 0;
             var queue = new ConcurrentQueue<int>(Enumerable.Range(0, BlockingThreadPool.NumThreads));
