@@ -41,11 +41,12 @@ MB_Annotation();
     {
         private static Lazy<PredictionEngine<ModelInput, ModelOutput>> PredictionEngine = new Lazy<PredictionEngine<ModelInput, ModelOutput>>(CreatePredictionEngine);
 
-        public static string MLNetModelPath = Path.GetFullPath(""");
+        public static string MLNetModelPath = Path.Combine(System.AppContext.BaseDirectory, """);
             this.Write(this.ToStringHelper.ToStringWithCulture(MLNetModelName));
             this.Write("\");\r\n");
-if(IsAzureImage){ 
-            this.Write(" \r\n        public static string OnnxModelPath = Path.GetFullPath(\"");
+if(IsAzureImage || IsAzureObjectDetection){ 
+            this.Write(" \r\n        public static string OnnxModelPath = Path.Combine(System.AppContext.Ba" +
+                    "seDirectory, \"");
             this.Write(this.ToStringHelper.ToStringWithCulture(OnnxModelName));
             this.Write("\");\r\n");
 } 
@@ -77,6 +78,7 @@ if(IsAzureImage){
 
 public string Namespace {get;set;}
 internal CSharp.GenerateTarget Target {get;set;}
+public bool IsAzureObjectDetection {get; set;}=false;
 public bool IsAzureImage {get; set;}=false;
 public string MLNetModelName {get; set;}
 public string OnnxModelName {get; set;}

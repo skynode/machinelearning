@@ -33,6 +33,11 @@ namespace Microsoft.ML.Tests
 {
     public class OnnxConversionTest : BaseTestBaseline
     {
+        // These two members are meant to be changed
+        // Only when manually testing the Onnx GPU nuggets
+        private const bool _fallbackToCpu = true;
+        private static int? _gpuDeviceId = null;
+
         private class AdultData
         {
             [LoadColumn(0, 10), ColumnName("FeatureVector")]
@@ -86,7 +91,7 @@ namespace Microsoft.ML.Tests
 
             // Step 3: Check ONNX model's text format. This test will be not necessary if Step 2 can run on Linux and
             // Mac to support cross-platform tests.
-            
+
             CheckEquality(subDir, onnxTextName, digitsOfPrecision: 3);
 
             Done();
@@ -134,7 +139,7 @@ namespace Microsoft.ML.Tests
         [Fact]
         public void KmeansOnnxConversionTest()
         {
-            // Create a new context for ML.NET operations. It can be used for exception tracking and logging, 
+            // Create a new context for ML.NET operations. It can be used for exception tracking and logging,
             // as a catalog of available operations and as the source of randomness.
             var mlContext = new MLContext(seed: 1);
 
@@ -379,7 +384,7 @@ namespace Microsoft.ML.Tests
                 new TextNormalizingEstimator(mlContext, keepDiacritics: true, caseMode: TextNormalizingEstimator.CaseMode.Upper, columns: new[] { ("UpperText", "text") })).Append(
                 new TextNormalizingEstimator(mlContext, keepDiacritics: true, caseMode: TextNormalizingEstimator.CaseMode.None, columns: new[] { ("OriginalText", "text") }));
             var onnxFileName = $"TextNormalizing.onnx";
-            
+
             TestPipeline(pipeline, dataView, onnxFileName, new ColumnComparison[] { new ColumnComparison("NormText"), new ColumnComparison("UpperText"), new ColumnComparison("OriginalText") });
 
             Done();
@@ -783,7 +788,7 @@ namespace Microsoft.ML.Tests
             .Append(mlContext.Transforms.NormalizeMinMax("Features"))
             .Append(mlContext.BinaryClassification.Trainers.FastTree(labelColumnName: "Label", featureColumnName: "Features", numberOfLeaves: 2, numberOfTrees: 1, minimumExampleCountPerLeaf: 2));
 
-            var model = pipeline.Fit(data);
+            using var model = pipeline.Fit(data);
             var transformedData = model.Transform(data);
 
             var onnxConversionContext = new OnnxContextImpl(mlContext, "A Simple Pipeline", "ML.NET", "0", 0, "machinelearning.dotnet", OnnxVersion.Stable);
@@ -811,12 +816,13 @@ namespace Microsoft.ML.Tests
                 if (IsOnnxRuntimeSupported())
                 {
                     // Evaluate the saved ONNX model using the data used to train the ML.NET pipeline.
-                    var onnxEstimator = mlContext.Transforms.ApplyOnnxModel(onnxModelPath);
+                    var onnxEstimator = mlContext.Transforms.ApplyOnnxModel(onnxModelPath, gpuDeviceId: _gpuDeviceId, fallbackToCpu: _fallbackToCpu);
                     var onnxTransformer = onnxEstimator.Fit(data);
                     var onnxResult = onnxTransformer.Transform(data);
                     CompareResults("Score", "Score", transformedData, onnxResult, isRightColumnOnnxScalar: true);
                     CompareResults("Probability", "Probability", transformedData, onnxResult, isRightColumnOnnxScalar: true);
                     CompareResults("PredictedLabel", "PredictedLabel", transformedData, onnxResult, isRightColumnOnnxScalar: true);
+                    (onnxTransformer as IDisposable)?.Dispose();
                 }
                 CheckEquality(subDir, onnxTextName, digitsOfPrecision: 3);
             }
@@ -972,10 +978,11 @@ namespace Microsoft.ML.Tests
                 if (IsOnnxRuntimeSupported())
                 {
                     // Evaluate the saved ONNX model using the data used to train the ML.NET pipeline.
-                    var onnxEstimator = mlContext.Transforms.ApplyOnnxModel(onnxModelPath);
+                    var onnxEstimator = mlContext.Transforms.ApplyOnnxModel(onnxModelPath, gpuDeviceId: _gpuDeviceId, fallbackToCpu: _fallbackToCpu);
                     var onnxTransformer = onnxEstimator.Fit(dataView);
                     var onnxResult = onnxTransformer.Transform(dataView);
                     CompareResults("pca", "pca", transformedData, onnxResult);
+                    (onnxTransformer as IDisposable)?.Dispose();
                 }
             }
             Done();
@@ -1147,7 +1154,7 @@ namespace Microsoft.ML.Tests
 
             // IsNaN outputs a binary tensor. Support for this has been added in the latest version
             // of Onnxruntime, but that hasn't been released yet.
-            // So we need to convert its type to Int32 until then. 
+            // So we need to convert its type to Int32 until then.
             // ConvertType part of the pipeline can be removed once we pick up a new release of the Onnx runtime
 
             var pipeline = mlContext.Transforms.IndicateMissingValues(new[] { new InputOutputColumnPair("MissingIndicator", "Features"), })
@@ -1316,9 +1323,12 @@ namespace Microsoft.ML.Tests
                             weighting: weighting)),
 
                 mlContext.Transforms.Text.ProduceWordBags("Tokens", "Text",
-                                        ngramLength: ngramLength,
-                                        useAllLengths: useAllLength,
-                                        weighting: weighting)
+                            ngramLength: ngramLength,
+                            useAllLengths: useAllLength,
+                            weighting: weighting),
+
+                mlContext.Transforms.Text.TokenizeIntoWords("Tokens0", "Text")
+                .Append(mlContext.Transforms.Text.ProduceWordBags("Tokens", "Tokens0"))
             };
 
             for (int i = 0; i < pipelines.Length; i++)
@@ -1336,10 +1346,10 @@ namespace Microsoft.ML.Tests
 
                 if (IsOnnxRuntimeSupported())
                 {
-                    var onnxEstimator = mlContext.Transforms.ApplyOnnxModel(onnxFilePath);
+                    var onnxEstimator = mlContext.Transforms.ApplyOnnxModel(onnxFilePath, gpuDeviceId: _gpuDeviceId, fallbackToCpu: _fallbackToCpu);
                     var onnxTransformer = onnxEstimator.Fit(dataView);
                     var onnxResult = onnxTransformer.Transform(dataView);
-                    var columnName = i == pipelines.Length - 1 ? "Tokens" : "NGrams";
+                    var columnName = i >= pipelines.Length - 2 ? "Tokens" : "NGrams";
                     CompareResults(columnName, columnName, transformedData, onnxResult, 3);
 
                     VBuffer<ReadOnlyMemory<char>> mlNetSlots = default;
@@ -1351,6 +1361,7 @@ namespace Microsoft.ML.Tests
                     var onnxSlotNames = onnxSlots.DenseValues().ToList();
                     for (int j = 0; j < mlNetSlots.Length; j++)
                         Assert.Equal(mlNetSlotNames[j].ToString(), onnxSlotNames[j].ToString());
+                    (onnxTransformer as IDisposable)?.Dispose();
                 }
             }
             Done();
@@ -1452,10 +1463,11 @@ namespace Microsoft.ML.Tests
             {
                 string[] inputNames = onnxModel.Graph.Input.Select(valueInfoProto => valueInfoProto.Name).ToArray();
                 string[] outputNames = onnxModel.Graph.Output.Select(valueInfoProto => valueInfoProto.Name).ToArray();
-                var onnxEstimator = mlContext.Transforms.ApplyOnnxModel(outputNames, inputNames, onnxModelPath);
+                var onnxEstimator = mlContext.Transforms.ApplyOnnxModel(outputNames, inputNames, onnxModelPath, gpuDeviceId: _gpuDeviceId, fallbackToCpu: _fallbackToCpu);
                 var onnxTransformer = onnxEstimator.Fit(dataView);
                 var onnxResult = onnxTransformer.Transform(dataView);
                 CompareResults("Label", "Label", outputData, onnxResult, isRightColumnOnnxScalar: true);
+                (onnxTransformer as IDisposable)?.Dispose();
             }
             Done();
         }
@@ -1533,6 +1545,46 @@ namespace Microsoft.ML.Tests
         }
 
         [Fact]
+        public void SelectiveExportOnnxTest()
+        {
+            var mlContext = new MLContext(seed: 1);
+
+            var trainDataPath = GetDataPath(TestDatasets.generatedRegressionDataset.trainFilename);
+            var dataView = mlContext.Data.LoadFromTextFile<AdultData>(trainDataPath,
+                separatorChar: ';',
+                hasHeader: true);
+
+            var mlpipeline = mlContext.Transforms.CopyColumns("Target1", "Target");
+            var onnxFileName = "copycolumns.onnx";
+
+            var mlmodel = mlpipeline.Fit(dataView);
+
+            var onnxModelPath = GetOutputPath(onnxFileName);
+            using (var stream = File.Create(onnxModelPath))
+            {
+                mlContext.Model.ConvertToOnnx(mlmodel, dataView, stream, "Target1");
+            }
+
+            var model = new OnnxCSharpToProtoWrapper.ModelProto();
+            using (var modelStream = File.OpenRead(onnxModelPath))
+            using (var codedStream = Google.Protobuf.CodedInputStream.CreateWithLimits(modelStream, Int32.MaxValue, 10))
+                model = OnnxCSharpToProtoWrapper.ModelProto.Parser.ParseFrom(codedStream);
+
+            Assert.True(model.Graph.Output.Count == 1);
+            Assert.Equal("Target1.output", model.Graph.Output[0].Name);
+
+            // Make sure that even though the column wasn't passed to ONNX, that it can still be used directly from ML.Net
+            var pipeline = mlContext.Transforms.ApplyOnnxModel(onnxModelPath);
+            var loadedModel = pipeline.Fit(dataView);
+
+            // Getting the preview will cause an issue if there is an error since ONNX is no longer exporting that column.
+            var loadedData = loadedModel.Transform(dataView).Preview(1);
+            Assert.Equal((Single)140.66, loadedData.ColumnView[1].Values[0]);
+
+            Done();
+        }
+
+        [Fact]
         public void UseKeyDataViewTypeAsUInt32InOnnxInput()
         {
             // In this test an onnx model which expect a uin32 input column is applied to a KeyDataViewType input column
@@ -1585,8 +1637,9 @@ namespace Microsoft.ML.Tests
             if (IsOnnxRuntimeSupported())
             {
                 // Step 5: Apply Onnx Model
-                var onnxEstimator = mlContext.Transforms.ApplyOnnxModel(outputNames, inputNames, onnxModelPath);
-                var onnxResult = onnxEstimator.Fit(reloadedData).Transform(reloadedData);
+                var onnxEstimator = mlContext.Transforms.ApplyOnnxModel(outputNames, inputNames, onnxModelPath, gpuDeviceId: _gpuDeviceId, fallbackToCpu: _fallbackToCpu);
+                var onnxTransformer = onnxEstimator.Fit(reloadedData);
+                var onnxResult = onnxTransformer.Transform(reloadedData);
 
                 // Step 6: Compare results to an onnx model created using the mappedData IDataView
                 // Notice that this ONNX model would actually include the steps to do the ValueToKeyTransformer mapping,
@@ -1597,8 +1650,9 @@ namespace Microsoft.ML.Tests
                 string onnxModelPath2 = GetOutputPath("onnxmodel2-kdvt-as-uint32.onnx");
                 using (FileStream stream = new FileStream(onnxModelPath2, FileMode.Create))
                     mlContext.Model.ConvertToOnnx(model, mappedData, stream);
-                var onnxEstimator2 = mlContext.Transforms.ApplyOnnxModel(outputNames, inputNames, onnxModelPath2);
-                var onnxResult2 = onnxEstimator2.Fit(originalData).Transform(originalData);
+                var onnxEstimator2 = mlContext.Transforms.ApplyOnnxModel(outputNames, inputNames, onnxModelPath2, gpuDeviceId: _gpuDeviceId, fallbackToCpu: _fallbackToCpu);
+                var onnxTransformer2 = onnxEstimator2.Fit(originalData);
+                var onnxResult2 = onnxTransformer2.Transform(originalData);
 
                 var stdSuffix = ".output";
                 foreach (var name in outputNames)
@@ -1607,6 +1661,8 @@ namespace Microsoft.ML.Tests
                     var colName = name.Replace(stdSuffix, "");
                     CompareResults(colName, colName, onnxResult, onnxResult2);
                 }
+                (onnxTransformer as IDisposable)?.Dispose();
+                (onnxTransformer2 as IDisposable)?.Dispose();
             }
 
             Done();
@@ -1790,7 +1846,7 @@ namespace Microsoft.ML.Tests
             }
             Done();
         }
-        
+
         [Fact]
         public void OneHotHashEncodingOnnxConversionWithCustomOpSetVersionTest()
         {
@@ -2013,7 +2069,7 @@ namespace Microsoft.ML.Tests
         private void TestPipeline<TLastTransformer>(EstimatorChain<TLastTransformer> pipeline, IDataView dataView, string onnxFileName, ColumnComparison[] columnsToCompare, string onnxTxtName = null, string onnxTxtSubDir = null)
             where TLastTransformer : class, ITransformer
         {
-            var model = pipeline.Fit(dataView);
+            using var model = pipeline.Fit(dataView);
             var transformedData = model.Transform(dataView);
             var onnxModel = ML.Model.ConvertToOnnxProtobuf(model, dataView);
 
@@ -2026,7 +2082,7 @@ namespace Microsoft.ML.Tests
             if (IsOnnxRuntimeSupported() && columnsToCompare != null)
             {
                 // Evaluate the saved ONNX model using the data used to train the ML.NET pipeline.
-                var onnxEstimator = ML.Transforms.ApplyOnnxModel(onnxModelPath);
+                var onnxEstimator = ML.Transforms.ApplyOnnxModel(onnxModelPath, gpuDeviceId: _gpuDeviceId, fallbackToCpu: _fallbackToCpu);
                 var onnxTransformer = onnxEstimator.Fit(dataView);
                 var onnxResult = onnxTransformer.Transform(dataView);
 
@@ -2035,6 +2091,7 @@ namespace Microsoft.ML.Tests
                 {
                     CompareResults(column.Name, column.Name, transformedData, onnxResult, column.Precision, true);
                 }
+                (onnxTransformer as IDisposable)?.Dispose();
             }
         }
 
